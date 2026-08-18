@@ -97,10 +97,17 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       } catch (e) {}
     }
 
-    if (isLocked) {
+    if (isLocked && isLockableUrl(tab.url)) {
       try {
         await chrome.tabs.sendMessage(tabId, { type: "SHOW_LOCK_SCREEN" });
-      } catch (err) {}
+      } catch (err) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ["security/crypto.js", "content.js"]
+          });
+        } catch (scriptErr) {}
+      }
     }
   }
 });
@@ -289,7 +296,12 @@ async function handleMessage(message, sender) {
       try {
         await chrome.tabs.sendMessage(tabId, { type: "SHOW_LOCK_SCREEN" });
       } catch (e) {
-        // Tab will pick up lock state on script injection or refresh
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            files: ["security/crypto.js", "content.js"]
+          });
+        } catch (scriptErr) {}
       }
 
       return { success: true, tabId };
