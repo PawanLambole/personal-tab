@@ -242,7 +242,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       tabStatusBadge.classList.remove("hidden");
 
       const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
-      const isLocked = Boolean(lockedTabs[activeTabId]?.locked);
+      let isLocked = Boolean(lockedTabs[activeTabId]?.locked);
+      if (!isLocked && hostname) {
+        for (const data of Object.values(lockedTabs)) {
+          if (data.locked && data.hostname && data.hostname === hostname) {
+            isLocked = true;
+            break;
+          }
+        }
+      }
       updateLockStatusState(isLocked);
     } catch (err) {
       showAlert("Error reading tab information.", "danger");

@@ -65,7 +65,12 @@
         return;
       }
 
-      const response = await chrome.runtime.sendMessage({ type: "CHECK_LOCK_STATUS" });
+      const payload = {
+        type: "CHECK_LOCK_STATUS",
+        url: window.location.href,
+        hostname: window.location.hostname
+      };
+      const response = await chrome.runtime.sendMessage(payload);
       if (response && response.isLocked) {
         showLockScreen(response);
       } else {
@@ -80,7 +85,12 @@
             return;
           }
 
-          const res = await chrome.runtime.sendMessage({ type: "CHECK_LOCK_STATUS" });
+          const payload = {
+            type: "CHECK_LOCK_STATUS",
+            url: window.location.href,
+            hostname: window.location.hostname
+          };
+          const res = await chrome.runtime.sendMessage(payload);
           if (res && res.isLocked) {
             showLockScreen(res);
           } else {

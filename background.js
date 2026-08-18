@@ -229,11 +229,11 @@ async function handleMessage(message, sender) {
       const lockedTabs = storage.lockedTabs || {};
       let isLocked = Boolean(lockedTabs[tabId]?.locked);
 
-      if (!isLocked && sender?.tab?.url) {
+      const targetHost = message.hostname || (sender?.tab?.url ? new URL(sender.tab.url).hostname : "");
+      if (!isLocked && targetHost) {
         try {
-          const senderHost = new URL(sender.tab.url).hostname;
           for (const data of Object.values(lockedTabs)) {
-            if (data.locked && data.hostname && data.hostname === senderHost) {
+            if (data.locked && data.hostname && data.hostname === targetHost) {
               isLocked = true;
               break;
             }
