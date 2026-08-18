@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>lulululu - Options</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="options-layout">
+    <header class="options-header">
+      <div class="brand">
+        <span class="logo">🔒</span>
+        <div>
+          <h1>lulululu</h1>
+          <p class="subtitle">Security Settings & Tab Management Dashboard</p>
+        </div>
+      </div>
+    </header>
+
+    <div id="alert-banner" class="alert hidden"></div>
+
+    <main class="options-grid">
+      <!-- Master Protection Toggle Card -->
+      <section class="card span-full">
+        <div class="card-header-row">
+          <div>
+            <h2>🛡️ Master Protection</h2>
+            <p class="card-desc">Global ON / OFF switch for tab locking. Turning OFF requires your password.</p>
+          </div>
+          <div class="master-toggle-box">
+            <span id="opt-master-status" class="master-status-on">Active (ON)</span>
+            <label class="switch">
+              <input type="checkbox" id="opt-chk-master-toggle" checked />
+              <span class="slider round"></span>
+            </label>
+          </div>
+        </div>
+
+        <hr class="divider" style="margin: 16px 0;">
+
+        <div class="card-header-row">
+          <div>
+            <h3 style="margin: 0 0 4px 0; font-size: 15px; font-weight: 600;">🔒 Block Access to chrome://extensions</h3>
+            <p class="card-desc" style="margin-bottom: 0;">Automatically close chrome://extensions tabs to prevent unauthorized disabling of this extension.</p>
+          </div>
+          <div class="master-toggle-box">
+            <label class="switch">
+              <input type="checkbox" id="opt-chk-block-ext-page" />
+              <span class="slider round"></span>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 1: Password Management -->
+      <section class="card">
+        <h2>🔑 Password Security</h2>
+        <p class="card-desc">Update your security password (any combination, min 4 chars).</p>
+
+        <form id="form-change-pin">
+          <div class="form-group">
+            <label for="input-current-pin">Current Password</label>
+            <input type="password" id="input-current-pin" placeholder="Current Password" maxlength="64" required autocomplete="off" />
+          </div>
+
+          <div class="form-group">
+            <label for="input-new-pin">New Password</label>
+            <input type="password" id="input-new-pin" placeholder="New Password (min 4 chars)" maxlength="64" required autocomplete="off" />
+          </div>
+
+          <div class="form-group">
+            <label for="input-confirm-new-pin">Confirm New Password</label>
+            <input type="password" id="input-confirm-new-pin" placeholder="Confirm New Password" maxlength="64" required autocomplete="off" />
+          </div>
+
+          <button type="submit" class="btn-primary">Update Password</button>
+        </form>
+      </section>
+
+      <!-- Card 2: Recovery Key Management -->
+      <section class="card">
+        <h2>🛡️ Recovery Key</h2>
+        <p class="card-desc">Regenerate a new recovery key. Your old recovery key will be invalidated.</p>
+
+        <form id="form-regen-key">
+          <div class="form-group">
+            <label for="input-regen-pin">Current Password Verification</label>
+            <input type="password" id="input-regen-pin" placeholder="Enter Current Password" maxlength="64" required autocomplete="off" />
+          </div>
+
+          <button type="submit" class="btn-secondary">Regenerate Recovery Key</button>
+        </form>
+
+        <div id="new-key-display-box" class="new-key-container hidden">
+          <h4>New Recovery Key Generated</h4>
+          <p class="desc-sm">Save this key in a secure location. It will not be displayed again.</p>
+
+          <div class="key-row">
+            <input type="text" id="new-recovery-key-text" readonly />
+            <button type="button" id="btn-copy-new-key" class="btn-secondary-sm">Copy</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 3: Locked Tabs Management (Full Width) -->
+      <section class="card span-full">
+        <div class="card-header-row">
+          <div>
+            <h2>🔒 Active Locked Tabs</h2>
+            <p class="card-desc">Manage tabs currently protected by Tab Locker.</p>
+          </div>
+          <button id="btn-unlock-all" class="btn-secondary">Unlock All Tabs</button>
+        </div>
+
+        <div id="locked-tabs-list" class="tabs-list-container">
+          <div class="empty-state">No tabs are currently locked.</div>
+        </div>
+      </section>
+
+      <!-- Card 4: Danger Zone (Full Width) -->
+      <section class="card span-full danger-zone">
+        <h2>⚠️ Danger Zone</h2>
+        <p class="card-desc">Resetting the extension will permanently delete your password, recovery key, settings, and lock states.</p>
+
+        <button id="btn-reset-extension" class="btn-danger">Reset Extension & Clear All Secrets</button>
+      </section>
+    </main>
+  </div>
+
+  <script src="../security/crypto.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

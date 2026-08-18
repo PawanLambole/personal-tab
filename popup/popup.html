@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>lulululu</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <span class="logo">🔒</span>
+        <span class="title">lulululu</span>
+      </div>
+      <button id="btn-options-gear" class="icon-btn" title="Open Settings">⚙</button>
+    </header>
+
+    <!-- Error/Status Alert Box -->
+    <div id="status-alert" class="alert hidden"></div>
+
+    <!-- View 1: First Time Setup View -->
+    <div id="view-setup" class="view hidden">
+      <div class="setup-card">
+        <h3>First-Time Security Setup</h3>
+        <p class="desc">Set a password (any combination of letters, numbers, or symbols, min 4 chars) to secure your locked browser tabs.</p>
+
+        <form id="setup-form">
+          <div class="form-group">
+            <label for="setup-pin">Create Password</label>
+            <input type="password" id="setup-pin" placeholder="Enter password (min 4 chars)" maxlength="64" required autocomplete="off" />
+          </div>
+
+          <div class="form-group">
+            <label for="setup-confirm-pin">Confirm Password</label>
+            <input type="password" id="setup-confirm-pin" placeholder="Confirm password" maxlength="64" required autocomplete="off" />
+          </div>
+
+          <hr class="divider">
+
+          <div class="recovery-box">
+            <h4>Recovery Key</h4>
+            <p class="desc-sm">Generate a recovery key to regain access if you ever forget your password. It will be shown only once.</p>
+
+            <div id="recovery-display-container" class="hidden">
+              <div class="key-display-row">
+                <input type="text" id="recovery-key-input" readonly />
+                <button type="button" id="btn-copy-key" class="btn-secondary-sm">Copy</button>
+              </div>
+
+              <div class="checkbox-group">
+                <input type="checkbox" id="chk-confirm-saved" />
+                <label for="chk-confirm-saved">I have securely saved my recovery key.</label>
+              </div>
+            </div>
+
+            <button type="button" id="btn-generate-key" class="btn-secondary">Generate Recovery Key</button>
+          </div>
+
+          <button type="submit" id="btn-complete-setup" class="btn-primary" disabled>Complete Setup</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- View 2: Main Active Tab Control View -->
+    <div id="view-main" class="view hidden">
+      <!-- Master Switch Box -->
+      <div class="master-switch-card">
+        <div class="master-header">
+          <span class="master-title">Master Lock Protection</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-master-toggle" checked />
+            <span class="slider round"></span>
+          </label>
+        </div>
+        <div id="master-status-text" class="master-status-on">🛡️ Protection Active (ON)</div>
+      </div>
+
+      <!-- Master Disabled Banner -->
+      <div id="master-disabled-banner" class="banner-danger hidden">
+        ⏸️ Master Protection is OFF. All tab locks are temporarily paused.
+      </div>
+
+      <div class="tab-card">
+        <div class="tab-header">
+          <span class="tab-label">Current Active Tab</span>
+          <span id="tab-status-badge" class="badge badge-unlocked">🔓 Unlocked</span>
+        </div>
+
+        <h4 id="tab-title" class="tab-title">Loading tab...</h4>
+        <div id="tab-hostname" class="tab-hostname">--</div>
+
+        <!-- Unsupported Page Banner -->
+        <div id="unsupported-banner" class="banner-warning hidden">
+          ⚠️ This Chrome page cannot be locked by this extension.
+        </div>
+
+        <!-- Action Controls -->
+        <div id="action-controls" class="action-rows">
+          <button id="btn-lock-tab" class="btn-primary">🔒 Lock This Tab</button>
+          <button id="btn-unlock-tab" class="btn-success hidden">🔓 Unlock Tab</button>
+        </div>
+      </div>
+
+      <!-- Quick Options Link -->
+      <div class="popup-footer">
+        <button id="btn-open-options" class="btn-text">⚙ Open Full Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../security/crypto.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
