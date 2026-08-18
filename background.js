@@ -1,5 +1,7 @@
 "use strict";
 
+importScripts("security/crypto.js");
+
 /**
  * Personal Tab Locker - Background Service Worker
  * Manages tab lock state, rate limiting, and dual tabId + hostname matching.
