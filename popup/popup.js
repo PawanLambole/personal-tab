@@ -60,6 +60,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   btnOptionsGear.addEventListener("click", openOptionsPage);
   btnOpenOptions.addEventListener("click", openOptionsPage);
 
+  // Storage listener to update UI live
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local") {
+      if (changes.protectionEnabled !== undefined) {
+        updateMasterSwitchUI(changes.protectionEnabled.newValue !== false);
+      }
+      if (changes.lockedTabs !== undefined) {
+        loadActiveTabInfo();
+      }
+    }
+  });
+
   // Initialize view state
   await checkInitialization();
 
@@ -203,8 +215,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Active Tab View Logic
   async function loadActiveTabInfo() {
     try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const currentTab = tabs[0];
+      let tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tabs || tabs.length === 0) {
+        tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      }
+      const currentTab = tabs ? tabs[0] : null;
 
       if (!currentTab) {
         showAlert("No active tab detected.", "danger");

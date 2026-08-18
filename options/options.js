@@ -33,6 +33,18 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Danger Zone Elements
   const btnResetExtension = document.getElementById("btn-reset-extension");
 
+  // Real-time Storage Listener to auto-update Locked Tabs card live
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local") {
+      if (changes.lockedTabs) {
+        loadLockedTabsList();
+      }
+      if (changes.protectionEnabled !== undefined) {
+        updateOptMasterSwitchUI(changes.protectionEnabled.newValue !== false);
+      }
+    }
+  });
+
   // Initial Load
   await initMasterSwitch();
   await loadLockedTabsList();
