@@ -45,6 +45,73 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  // Settings Authentication Elements
+  const optionsLockCard = document.getElementById("options-lock-card");
+  const formOptionsAuth = document.getElementById("form-options-auth");
+  const inputOptionsAuthPin = document.getElementById("input-options-auth-pin");
+  const optionsAuthError = document.getElementById("options-auth-error");
+
+  // Check Settings Lock Authentication on load
+  await checkOptionsAuthentication();
+
+  async function checkOptionsAuthentication() {
+    const storage = await chrome.storage.local.get([
+      "initialized",
+      "salt",
+      "pinHash",
+      "optionsAuthUntil"
+    ]);
+
+    if (!storage.initialized) {
+      showSettingsContent();
+      return;
+    }
+
+    const now = Date.now();
+    if (storage.optionsAuthUntil && storage.optionsAuthUntil > now) {
+      // Clear single-use grant
+      await chrome.storage.local.remove("optionsAuthUntil");
+      showSettingsContent();
+      return;
+    }
+
+    hideSettingsContent();
+  }
+
+  function hideSettingsContent() {
+    document.querySelectorAll(".options-grid > section:not(#options-lock-card)").forEach((sec) => {
+      sec.classList.add("hidden");
+    });
+    optionsLockCard.classList.remove("hidden");
+    setTimeout(() => inputOptionsAuthPin?.focus(), 50);
+  }
+
+  function showSettingsContent() {
+    optionsLockCard.classList.add("hidden");
+    document.querySelectorAll(".options-grid > section:not(#options-lock-card)").forEach((sec) => {
+      sec.classList.remove("hidden");
+    });
+  }
+
+  formOptionsAuth.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    optionsAuthError.classList.add("hidden");
+    const pin = inputOptionsAuthPin.value.trim();
+    if (!pin) return;
+
+    const storage = await chrome.storage.local.get(["salt", "pinHash"]);
+    const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+
+    if (inputHash === storage.pinHash) {
+      showSettingsContent();
+    } else {
+      optionsAuthError.textContent = "Incorrect password. Access denied.";
+      optionsAuthError.classList.remove("hidden");
+      inputOptionsAuthPin.value = "";
+      inputOptionsAuthPin.focus();
+    }
+  });
+
   // Initial Load
   await initMasterSwitch();
   await loadLockedTabsList();

@@ -38,18 +38,18 @@
           initTabLockCheck();
         }
       }
-      if (changes.lockedTabs !== undefined) {
-        initTabLockCheck();
-      }
     }
   });
 
   // Ensure underlying page is inert once DOM is ready
-  document.addEventListener("DOMContentLoaded", () => {
-    if (isCurrentlyLocked) {
-      setUnderlyingPageInert(true);
-    }
-  });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      if (isCurrentlyLocked) {
+        setUnderlyingPageInert(true);
+        focusCurrentLockInput();
+      }
+    });
+  }
 
   // Listen for direct messages from background service worker or popup
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -62,12 +62,24 @@
     }
   });
 
+  // Real-time SPA navigation watcher (e.g. switching between chats in ChatGPT)
+  let lastObservedUrl = window.location.href;
+  setInterval(() => {
+    if (!isCurrentlyLocked) {
+      const current = window.location.href;
+      if (current !== lastObservedUrl) {
+        lastObservedUrl = current;
+        initTabLockCheck();
+      }
+    }
+  }, 350);
+
   // Capture keystrokes aimed at underlying page while locked
   function onWindowKeyCapture(e) {
     if (!isCurrentlyLocked) return;
 
     const path = e.composedPath ? e.composedPath() : [];
-    const isFromOverlay = overlayHost && path.includes(overlayHost);
+    const isFromOverlay = path.some((el) => el && el.id === "ptl-lock-overlay-host");
 
     if (isFromOverlay) {
       // Keystroke was typed inside our lock screen overlay input.
@@ -82,7 +94,19 @@
     focusCurrentLockInput();
   }
 
-  window.addEventListener("keydown", onWindowKeyCapture, true);
+  // Prevent background page scripts from stealing focus away from lock input
+  function onWindowFocusCapture(e) {
+    if (!isCurrentlyLocked) return;
+
+    const path = e.composedPath ? e.composedPath() : [];
+    const isFromOverlay = path.some((el) => el && el.id === "ptl-lock-overlay-host");
+
+    if (!isFromOverlay) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      focusCurrentLockInput();
+    }
+  }
 
   function getActiveLockInput() {
     if (!shadowRoot) return null;
@@ -104,14 +128,24 @@
     }
   }
 
+  let reloadHandled = false;
   function checkIsPageReload() {
+    if (reloadHandled) return false;
     try {
       const navEntries = window.performance && performance.getEntriesByType ? performance.getEntriesByType("navigation") : [];
       if (navEntries && navEntries.length > 0) {
-        return navEntries[0].type === "reload";
+        const isReload = navEntries[0].type === "reload";
+        if (isReload) {
+          reloadHandled = true;
+          return true;
+        }
       }
       if (window.performance && performance.navigation) {
-        return performance.navigation.type === 1; // 1 = TYPE_RELOAD
+        const isReload = performance.navigation.type === 1; // 1 = TYPE_RELOAD
+        if (isReload) {
+          reloadHandled = true;
+          return true;
+        }
       }
     } catch (e) {}
     return false;
@@ -225,12 +259,22 @@
       document.documentElement.appendChild(overlayHost);
     }
 
+    // Dynamically attach keyboard and focus guards
+    window.removeEventListener("keydown", onWindowKeyCapture, true);
+    window.addEventListener("keydown", onWindowKeyCapture, true);
+    window.removeEventListener("focusin", onWindowFocusCapture, true);
+    window.addEventListener("focusin", onWindowFocusCapture, true);
+
     setTimeout(focusCurrentLockInput, 50);
   }
 
   function removeLockScreen() {
     isCurrentlyLocked = false;
     lastLockStatus = null;
+
+    // Dynamically remove keyboard and focus guards
+    window.removeEventListener("keydown", onWindowKeyCapture, true);
+    window.removeEventListener("focusin", onWindowFocusCapture, true);
 
     if (countdownTimer) {
       clearInterval(countdownTimer);
@@ -503,7 +547,8 @@
       try {
         const response = await chrome.runtime.sendMessage({
           type: "VERIFY_PIN",
-          pin
+          pin,
+          url: window.location.href
         });
 
         if (response && response.success) {
@@ -700,7 +745,8 @@
           type: "SET_NEW_PIN_WITH_RECOVERY",
           recoveryKey: verifiedRecoveryKey,
           newPin,
-          confirmNewPin
+          confirmNewPin,
+          url: window.location.href
         });
 
         if (response && response.success) {

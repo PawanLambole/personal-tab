@@ -65,6 +65,53 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         await chrome.tabs.remove(tabId);
       } catch (e) {}
     }
+    return;
+  }
+
+  // Handle SPA in-page navigation (e.g. switching between chats in ChatGPT)
+  if (changeInfo.url) {
+    const { protectionEnabled, lockedTabs = {}, lockoutUntil = 0 } = await chrome.storage.local.get([
+      "protectionEnabled",
+      "lockedTabs",
+      "lockoutUntil"
+    ]);
+
+    if (protectionEnabled === false) return;
+
+    let hostname = "";
+    try {
+      hostname = new URL(changeInfo.url).hostname;
+    } catch (e) {}
+
+    const targetNorm = hostname ? hostname.toLowerCase().replace(/^www\./, "") : "";
+    let isDomainLocked = false;
+    for (const data of Object.values(lockedTabs)) {
+      const dataNorm = data.hostname ? data.hostname.toLowerCase().replace(/^www\./, "") : "";
+      if (data.locked && dataNorm === targetNorm) {
+        isDomainLocked = true;
+        break;
+      }
+    }
+
+    if (isDomainLocked) {
+      const session = unlockedSessions[tabId];
+      const sessionUrl = typeof session === "object" ? session.url : "";
+      const sessionKey = getConversationKey(sessionUrl);
+      const newKey = getConversationKey(changeInfo.url);
+
+      // If user navigated to a different conversation/chat path, lock the tab again!
+      if (!session || (sessionKey && newKey && sessionKey !== newKey)) {
+        delete unlockedSessions[tabId];
+
+        const lockout = getLockoutStatus(lockoutUntil);
+        try {
+          await chrome.tabs.sendMessage(tabId, {
+            type: "SHOW_LOCK_SCREEN",
+            lockStatus: { isLocked: true, ...lockout }
+          });
+        } catch (e) {}
+      }
+    }
   }
 });
 
@@ -74,6 +121,23 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 function isLockableUrl(url) {
   if (!url || typeof url !== "string") return false;
   return url.startsWith("http://") || url.startsWith("https://");
+}
+
+/**
+ * Normalizes a URL to a distinct conversation or page key.
+ * Strips query parameters and hash fragments so switching chats in SPAs like ChatGPT
+ * (e.g. /c/uuid-1 to /c/uuid-2) triggers a distinct key, while scrolling or typing in the same chat does not.
+ */
+function getConversationKey(urlStr) {
+  if (!urlStr || typeof urlStr !== "string") return "";
+  try {
+    const u = new URL(urlStr);
+    const hostNorm = u.hostname.toLowerCase().replace(/^www\./, "");
+    const pathNorm = u.pathname.replace(/\/+$/, "");
+    return `${hostNorm}${pathNorm}`;
+  } catch (e) {
+    return urlStr;
+  }
 }
 
 /**
@@ -140,9 +204,11 @@ async function handleMessage(message, sender) {
         hostname = targetTab.url || "";
       }
 
-      if (!isLocked && hostname) {
+      const targetNorm = hostname ? hostname.toLowerCase().replace(/^www\./, "") : "";
+      if (!isLocked && targetNorm) {
         for (const data of Object.values(lockedTabs)) {
-          if (data.locked && data.hostname && data.hostname === hostname) {
+          const dataNorm = data.hostname ? data.hostname.toLowerCase().replace(/^www\./, "") : "";
+          if (data.locked && dataNorm === targetNorm) {
             isLocked = true;
             break;
           }
@@ -179,8 +245,17 @@ async function handleMessage(message, sender) {
 
       // Check if session is already unlocked for this tab and host
       if (tabId && unlockedSessions[tabId]) {
-        const sessionHost = unlockedSessions[tabId];
-        if (sessionHost === true || !targetHost || sessionHost === targetHost) {
+        const session = unlockedSessions[tabId];
+        const sessionHost = typeof session === "object" ? session.host : session;
+        const sessionUrl = typeof session === "object" ? session.url : "";
+
+        const currentUrl = message.url || (sender?.tab?.url ? sender.tab.url : "");
+        const sessionKey = getConversationKey(sessionUrl);
+        const currentKey = getConversationKey(currentUrl);
+
+        if (sessionKey && currentKey && sessionKey !== currentKey) {
+          delete unlockedSessions[tabId];
+        } else if (sessionHost === true || !targetHost || sessionHost === targetHost) {
           return {
             success: true,
             isLocked: false
@@ -191,15 +266,30 @@ async function handleMessage(message, sender) {
       const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
       let isLocked = Boolean(lockedTabs[tabId]?.locked);
 
-      if (!isLocked && targetHost) {
+      const targetNorm = targetHost ? targetHost.toLowerCase().replace(/^www\./, "") : "";
+
+      if (!isLocked && targetNorm) {
         try {
           for (const data of Object.values(lockedTabs)) {
-            if (data.locked && data.hostname && data.hostname === targetHost) {
+            const dataNorm = data.hostname ? data.hostname.toLowerCase().replace(/^www\./, "") : "";
+            if (data.locked && dataNorm === targetNorm) {
               isLocked = true;
               break;
             }
           }
         } catch (e) {}
+      }
+
+      // If domain is locked and this reopened tab doesn't have an entry yet, associate it
+      if (isLocked && tabId && !lockedTabs[tabId]) {
+        lockedTabs[tabId] = {
+          locked: true,
+          hostname: targetHost,
+          title: sender?.tab?.title || targetHost,
+          url: sender?.tab?.url || "",
+          lockedAt: Date.now()
+        };
+        await chrome.storage.local.set({ lockedTabs });
       }
 
       const lockout = getLockoutStatus(storage.lockoutUntil);
@@ -255,8 +345,14 @@ async function handleMessage(message, sender) {
 
       await chrome.storage.local.set({ lockedTabs });
 
+      const lockout = getLockoutStatus(storage.lockoutUntil);
+      const lockPayload = {
+        type: "SHOW_LOCK_SCREEN",
+        lockStatus: { isLocked: true, ...lockout }
+      };
+
       try {
-        await chrome.tabs.sendMessage(tab.id, { type: "SHOW_LOCK_SCREEN" });
+        await chrome.tabs.sendMessage(tab.id, lockPayload);
       } catch (e) {
         try {
           await chrome.scripting.executeScript({
@@ -265,7 +361,7 @@ async function handleMessage(message, sender) {
           });
           setTimeout(async () => {
             try {
-              await chrome.tabs.sendMessage(tab.id, { type: "SHOW_LOCK_SCREEN" });
+              await chrome.tabs.sendMessage(tab.id, lockPayload);
             } catch (err) {}
           }, 60);
         } catch (scriptErr) {}
@@ -356,7 +452,12 @@ async function handleMessage(message, sender) {
         } catch (e) {}
 
         if (targetTabId) {
-          unlockedSessions[targetTabId] = host || true;
+          const currentUrl = message.url || sender?.tab?.url || "";
+          unlockedSessions[targetTabId] = {
+            host: host || true,
+            url: currentUrl
+          };
+
           try {
             await chrome.tabs.sendMessage(targetTabId, { type: "REMOVE_LOCK_SCREEN" });
           } catch (e) {}
@@ -439,8 +540,18 @@ async function handleMessage(message, sender) {
       });
 
       const targetTabId = sender?.tab?.id;
+      let host = "";
+      try {
+        if (sender?.tab?.url) host = new URL(sender.tab.url).hostname;
+      } catch (e) {}
+
       if (targetTabId) {
-        unlockedSessions[targetTabId] = true;
+        const currentUrl = message.url || sender?.tab?.url || "";
+        unlockedSessions[targetTabId] = {
+          host: host || true,
+          url: currentUrl
+        };
+
         try {
           await chrome.tabs.sendMessage(targetTabId, { type: "REMOVE_LOCK_SCREEN" });
         } catch (e) {}

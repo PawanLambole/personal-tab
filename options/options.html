@@ -21,6 +21,22 @@
     <div id="alert-banner" class="alert hidden"></div>
 
     <main class="options-grid">
+      <!-- Locked Settings Authentication Card -->
+      <section id="options-lock-card" class="card span-full options-lock-card hidden">
+        <div class="lock-auth-content">
+          <div class="lock-shield-icon">🔒</div>
+          <h2>Settings Locked</h2>
+          <p class="card-desc">Enter your password to access full settings and tab management.</p>
+          <form id="form-options-auth">
+            <div class="form-group" style="max-width: 360px; margin: 0 auto 16px auto;">
+              <input type="password" id="input-options-auth-pin" placeholder="Enter Password" maxlength="64" required autofocus autocomplete="off" />
+            </div>
+            <button type="submit" class="btn-primary" style="max-width: 360px; margin: 0 auto; display: block;">Unlock Settings</button>
+          </form>
+          <div id="options-auth-error" class="alert alert-danger hidden" style="max-width: 360px; margin: 16px auto 0 auto;"></div>
+        </div>
+      </section>
+
       <!-- Master Protection Toggle Card -->
       <section class="card span-full">
         <div class="card-header-row">

@@ -40,8 +40,31 @@ document.addEventListener("DOMContentLoaded", async () => {
   let activeTabObject = null;
   let rawGeneratedRecoveryKey = "";
 
-  // Navigation to Options Page
-  const openOptionsPage = () => {
+  // Navigation to Options Page (Protected by Password)
+  const openOptionsPage = async () => {
+    try {
+      const storage = await chrome.storage.local.get(["initialized", "salt", "pinHash"]);
+      if (storage.initialized) {
+        const pin = prompt("Enter your password to open Full Settings:");
+        if (pin === null || !pin.trim()) return;
+
+        const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+        if (inputHash !== storage.pinHash) {
+          showAlert("Incorrect password. Access denied.", "danger");
+          return;
+        }
+
+        // Authorize options page access for the next 60 seconds
+        await chrome.storage.local.set({ optionsAuthUntil: Date.now() + 60000 });
+      }
+
+      navigateToOptions();
+    } catch (e) {
+      navigateToOptions();
+    }
+  };
+
+  const navigateToOptions = () => {
     try {
       if (chrome.runtime.openOptionsPage) {
         chrome.runtime.openOptionsPage(() => {
