@@ -316,7 +316,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           try {
             await chrome.scripting.executeScript({
               target: { tabId: activeTabId },
-              files: ["security/crypto.js", "content.js"]
+              files: ["content.js"]
             });
             setTimeout(async () => {
               try {
@@ -342,24 +342,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (pin === null || !pin.trim()) return; // Cancelled or empty
 
     try {
-      const storage = await chrome.storage.local.get(["salt", "pinHash", "lockedTabs"]);
-      const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+      const response = await chrome.runtime.sendMessage({
+        type: "UNLOCK_TAB",
+        pin
+      });
 
-      if (inputHash && inputHash === storage.pinHash) {
-        const lockedTabs = storage.lockedTabs || {};
-        delete lockedTabs[activeTabId];
-        await chrome.storage.local.set({ lockedTabs });
-
-        // Notify content script to remove lock screen
-        try {
-          await chrome.tabs.sendMessage(activeTabId, { type: "REMOVE_LOCK_SCREEN" });
-        } catch (e) {}
-
+      if (response && response.success) {
         updateLockStatusState(false);
         showAlert("🔓 Tab unlocked!", "success");
         setTimeout(hideAlert, 2000);
       } else {
-        showAlert("Incorrect password.", "danger");
+        showAlert(response?.error || "Incorrect password.", "danger");
       }
     } catch (err) {
       showAlert("Error unlocking tab.", "danger");

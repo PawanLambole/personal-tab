@@ -36,7 +36,6 @@
         "https://*/*"
       ],
       "js": [
-        "security/crypto.js",
         "content.js"
       ],
       "run_at": "document_start"

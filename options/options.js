@@ -238,7 +238,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
           if (inputHash && inputHash === storage.pinHash) {
             const currentLocked = storage.lockedTabs || {};
+            const tabData = currentLocked[tabId];
             delete currentLocked[tabId];
+
+            if (tabData && tabData.hostname) {
+              for (const [id, d] of Object.entries(currentLocked)) {
+                if (d.hostname === tabData.hostname) {
+                  delete currentLocked[id];
+                  try {
+                    await chrome.tabs.sendMessage(parseInt(id, 10), { type: "REMOVE_LOCK_SCREEN" });
+                  } catch (e) {}
+                }
+              }
+            }
+
             await chrome.storage.local.set({ lockedTabs: currentLocked });
 
             try {

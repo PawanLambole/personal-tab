@@ -6,7 +6,7 @@
  * All computations stay strictly local to the user's browser.
  */
 
-const TabLockerCrypto = (function () {
+var TabLockerCrypto = (function () {
   /**
    * Generates a cryptographically secure random salt hex string.
    * @returns {string} 32-character hex salt string

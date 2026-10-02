@@ -3,17 +3,27 @@
 /**
  * Personal Tab Locker - Content Script
  * Injected into http:// and https:// webpages.
- * Uses closed Shadow DOM, document-level style isolation, and chrome.storage.onChanged
- * to ensure tab locking and Master Protection OFF/ON toggles reflect instantly across all tabs.
+ * Uses closed Shadow DOM, inert document isolation, and capture-phase focus/keyboard trapping
+ * to ensure tab locking is completely secure, leak-proof, and does NOT cause hydration or reload crashes.
  */
 
 (function () {
+  if (window.__PTL_CONTENT_SCRIPT_INITIALIZED__) {
+    if (typeof window.__PTL_CHECK_LOCK__ === "function") {
+      window.__PTL_CHECK_LOCK__();
+    }
+    return;
+  }
+  window.__PTL_CONTENT_SCRIPT_INITIALIZED__ = true;
+
   let overlayHost = null;
   let shadowRoot = null;
   let countdownTimer = null;
   let isCurrentlyLocked = false;
   let lockObserver = null;
   let lastLockStatus = null;
+
+  window.__PTL_CHECK_LOCK__ = initTabLockCheck;
 
   // Perform lock check immediately upon injection
   initTabLockCheck();
@@ -56,6 +66,70 @@
       sendResponse({ success: true });
     }
   });
+
+  // Global capture listeners to trap keyboard events and focus while locked
+  function onWindowKeyCapture(e) {
+    if (!isCurrentlyLocked) return;
+
+    const path = e.composedPath ? e.composedPath() : [];
+    const isFromOverlay = overlayHost && (path.includes(overlayHost) || e.target === overlayHost);
+
+    if (isFromOverlay) {
+      // Keystroke was typed inside the lock screen input.
+      // Stop it from propagating to window/document listeners so host page (e.g. ChatGPT) never sees it!
+      e.stopPropagation();
+      return;
+    }
+
+    // Keystroke was aimed at the underlying page:
+    // Drop the event completely!
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    focusCurrentLockInput();
+  }
+
+  function onWindowFocusCapture(e) {
+    if (!isCurrentlyLocked) return;
+
+    const path = e.composedPath ? e.composedPath() : [];
+    const isFromOverlay = overlayHost && path.includes(overlayHost);
+
+    if (!isFromOverlay) {
+      // Underlying page element tried to steal focus:
+      // Drop the event and refocus our overlay input
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      focusCurrentLockInput();
+    }
+  }
+
+  window.addEventListener("keydown", onWindowKeyCapture, true);
+  window.addEventListener("keyup", onWindowKeyCapture, true);
+  window.addEventListener("keypress", onWindowKeyCapture, true);
+  window.addEventListener("focusin", onWindowFocusCapture, true);
+  window.addEventListener("focus", onWindowFocusCapture, true);
+
+  function getActiveLockInput() {
+    if (!shadowRoot) return null;
+    return (
+      shadowRoot.getElementById("pin-input") ||
+      shadowRoot.getElementById("key-input") ||
+      shadowRoot.getElementById("new-pin-input") ||
+      shadowRoot.getElementById("confirm-pin-input")
+    );
+  }
+
+  function focusCurrentLockInput() {
+    if (!isCurrentlyLocked) return;
+    const input = getActiveLockInput();
+    if (input) {
+      try {
+        input.focus();
+      } catch (e) {}
+    }
+  }
 
   async function initTabLockCheck() {
     try {
@@ -105,7 +179,11 @@
     if (lockObserver) return;
     lockObserver = new MutationObserver(() => {
       if (isCurrentlyLocked) {
-        enforceLockScreen();
+        const missingHost = !overlayHost || !document.documentElement.contains(overlayHost);
+        const missingClass = !document.documentElement.classList.contains("ptl-locked-active");
+        if (missingHost || missingClass) {
+          enforceLockScreen();
+        }
       }
     });
     lockObserver.observe(document.documentElement, {
@@ -115,22 +193,41 @@
     });
   }
 
+  function setUnderlyingPageInert(active) {
+    if (document.body) {
+      if (active) {
+        document.body.setAttribute("inert", "");
+        try {
+          document.body.inert = true;
+        } catch (e) {}
+      } else {
+        document.body.removeAttribute("inert");
+        try {
+          document.body.inert = false;
+        } catch (e) {}
+      }
+    }
+  }
+
   function enforceLockScreen() {
     if (!isCurrentlyLocked) return;
     injectGlobalLockStyles();
+    setUnderlyingPageInert(true);
 
     if (!document.documentElement.classList.contains("ptl-locked-active")) {
       document.documentElement.classList.add("ptl-locked-active");
     }
 
-    if (!overlayHost || !document.documentElement.contains(overlayHost)) {
-      if (!overlayHost) {
-        overlayHost = document.createElement("div");
-        overlayHost.id = "ptl-lock-overlay-host";
-        shadowRoot = overlayHost.attachShadow({ mode: "closed" });
-        renderPinView(lastLockStatus?.isLockedOut ? lastLockStatus.remainingSeconds : 0);
-      }
+    if (!overlayHost) {
+      overlayHost = document.createElement("div");
+      overlayHost.id = "ptl-lock-overlay-host";
+      shadowRoot = overlayHost.attachShadow({ mode: "closed" });
+      renderPinView(lastLockStatus?.isLockedOut ? lastLockStatus.remainingSeconds : 0);
+    }
+
+    if (!document.documentElement.contains(overlayHost)) {
       document.documentElement.appendChild(overlayHost);
+      setTimeout(focusCurrentLockInput, 50);
     }
   }
 
@@ -141,13 +238,13 @@
     style.textContent = `
       html.ptl-locked-active {
         overflow: hidden !important;
-        height: 100vh !important;
+        height: 100% !important;
       }
-      html.ptl-locked-active > body {
-        display: none !important;
-      }
-      html.ptl-locked-active > *:not(#ptl-lock-overlay-host):not(head):not(style) {
-        display: none !important;
+      html.ptl-locked-active body {
+        overflow: hidden !important;
+        pointer-events: none !important;
+        user-select: none !important;
+        -webkit-user-select: none !important;
       }
       #ptl-lock-overlay-host {
         position: fixed !important;
@@ -180,6 +277,7 @@
     lastLockStatus = lockStatus;
 
     injectGlobalLockStyles();
+    setUnderlyingPageInert(true);
     document.documentElement.classList.add("ptl-locked-active");
 
     if (!overlayHost) {
@@ -190,6 +288,7 @@
       renderPinView(lockStatus?.isLockedOut ? lockStatus.remainingSeconds : 0);
     } else if (!document.documentElement.contains(overlayHost)) {
       document.documentElement.appendChild(overlayHost);
+      setTimeout(focusCurrentLockInput, 50);
     }
 
     setupMutationObserver();
@@ -211,6 +310,7 @@
 
     document.documentElement.classList.remove("ptl-locked-active");
     removeGlobalLockStyles();
+    setUnderlyingPageInert(false);
 
     if (overlayHost && overlayHost.parentNode) {
       overlayHost.parentNode.removeChild(overlayHost);
@@ -437,6 +537,21 @@
     const pinInput = shadowRoot.getElementById("pin-input");
     const errorBox = shadowRoot.getElementById("error-box");
     const forgotBtn = shadowRoot.getElementById("forgot-btn");
+    const container = shadowRoot.querySelector(".lock-container");
+
+    // Shield events inside the shadow root from bubbling to host page
+    const stopBubble = (e) => e.stopPropagation();
+    ["keydown", "keyup", "keypress", "input", "change"].forEach((evt) => {
+      pinInput.addEventListener(evt, stopBubble);
+      form.addEventListener(evt, stopBubble);
+    });
+
+    container.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (e.target !== pinInput && e.target !== shadowRoot.getElementById("unlock-btn") && e.target !== forgotBtn) {
+        pinInput.focus();
+      }
+    });
 
     if (lockoutRemaining > 0) {
       startCountdownTimer(lockoutRemaining, () => renderPinView(0));
@@ -446,6 +561,7 @@
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      e.stopPropagation();
       const pin = pinInput.value.trim();
       if (!pin) return;
 
@@ -475,7 +591,8 @@
       }
     });
 
-    forgotBtn.addEventListener("click", () => {
+    forgotBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
       renderRecoveryView();
     });
   }
@@ -520,6 +637,20 @@
     const keyInput = shadowRoot.getElementById("key-input");
     const errorBox = shadowRoot.getElementById("error-box");
     const backBtn = shadowRoot.getElementById("back-pin-btn");
+    const container = shadowRoot.querySelector(".lock-container");
+
+    const stopBubble = (e) => e.stopPropagation();
+    ["keydown", "keyup", "keypress", "input", "change"].forEach((evt) => {
+      keyInput.addEventListener(evt, stopBubble);
+      form.addEventListener(evt, stopBubble);
+    });
+
+    container.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (e.target !== keyInput && e.target !== shadowRoot.getElementById("verify-key-btn") && e.target !== backBtn) {
+        keyInput.focus();
+      }
+    });
 
     keyInput.focus();
 
@@ -530,6 +661,7 @@
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      e.stopPropagation();
       const recoveryKey = keyInput.value.trim();
       if (!recoveryKey) return;
 
@@ -553,7 +685,8 @@
       }
     });
 
-    backBtn.addEventListener("click", () => {
+    backBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
       renderPinView(0);
     });
   }
@@ -605,11 +738,25 @@
     const newPinInput = shadowRoot.getElementById("new-pin-input");
     const confirmPinInput = shadowRoot.getElementById("confirm-pin-input");
     const errorBox = shadowRoot.getElementById("error-box");
+    const container = shadowRoot.querySelector(".lock-container");
+
+    const stopBubble = (e) => e.stopPropagation();
+    ["keydown", "keyup", "keypress", "input", "change"].forEach((evt) => {
+      newPinInput.addEventListener(evt, stopBubble);
+      confirmPinInput.addEventListener(evt, stopBubble);
+      form.addEventListener(evt, stopBubble);
+    });
+
+    container.addEventListener("click", (e) => {
+      e.stopPropagation();
+      newPinInput.focus();
+    });
 
     newPinInput.focus();
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      e.stopPropagation();
       const newPin = newPinInput.value.trim();
       const confirmNewPin = confirmPinInput.value.trim();
 
