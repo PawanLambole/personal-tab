@@ -75,14 +75,13 @@
     const isFromOverlay = overlayHost && (path.includes(overlayHost) || e.target === overlayHost);
 
     if (isFromOverlay) {
-      // Keystroke was typed inside the lock screen input.
-      // Stop it from propagating to window/document listeners so host page (e.g. ChatGPT) never sees it!
-      e.stopPropagation();
+      // Keystroke was typed inside the lock screen overlay input.
+      // Allow it to reach our input (do NOT stop propagation down to input in capture phase).
       return;
     }
 
-    // Keystroke was aimed at the underlying page:
-    // Drop the event completely!
+    // Keystroke was aimed at the underlying page while locked (e.g. ChatGPT prompt):
+    // Drop the event completely so host page never receives it!
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
@@ -131,6 +130,19 @@
     }
   }
 
+  function checkIsPageReload() {
+    try {
+      const navEntries = window.performance && performance.getEntriesByType ? performance.getEntriesByType("navigation") : [];
+      if (navEntries && navEntries.length > 0) {
+        return navEntries[0].type === "reload";
+      }
+      if (window.performance && performance.navigation) {
+        return performance.navigation.type === 1; // 1 = TYPE_RELOAD
+      }
+    } catch (e) {}
+    return false;
+  }
+
   async function initTabLockCheck() {
     try {
       const storage = await chrome.storage.local.get(["protectionEnabled"]);
@@ -139,8 +151,11 @@
         return;
       }
 
+      const isReload = checkIsPageReload();
+
       const payload = {
         type: "CHECK_LOCK_STATUS",
+        isReload,
         url: window.location.href,
         hostname: window.location.hostname
       };
@@ -159,8 +174,11 @@
             return;
           }
 
+          const isReload = checkIsPageReload();
+
           const payload = {
             type: "CHECK_LOCK_STATUS",
+            isReload,
             url: window.location.href,
             hostname: window.location.hostname
           };
@@ -209,6 +227,19 @@
     }
   }
 
+  function createOverlayHost(lockStatus) {
+    if (!overlayHost) {
+      overlayHost = document.createElement("div");
+      overlayHost.id = "ptl-lock-overlay-host";
+      const stopBubble = (e) => e.stopPropagation();
+      ["keydown", "keyup", "keypress"].forEach((evt) => {
+        overlayHost.addEventListener(evt, stopBubble);
+      });
+      shadowRoot = overlayHost.attachShadow({ mode: "closed" });
+      renderPinView(lockStatus?.isLockedOut ? lockStatus.remainingSeconds : 0);
+    }
+  }
+
   function enforceLockScreen() {
     if (!isCurrentlyLocked) return;
     injectGlobalLockStyles();
@@ -218,12 +249,7 @@
       document.documentElement.classList.add("ptl-locked-active");
     }
 
-    if (!overlayHost) {
-      overlayHost = document.createElement("div");
-      overlayHost.id = "ptl-lock-overlay-host";
-      shadowRoot = overlayHost.attachShadow({ mode: "closed" });
-      renderPinView(lastLockStatus?.isLockedOut ? lastLockStatus.remainingSeconds : 0);
-    }
+    createOverlayHost(lastLockStatus);
 
     if (!document.documentElement.contains(overlayHost)) {
       document.documentElement.appendChild(overlayHost);
@@ -280,13 +306,9 @@
     setUnderlyingPageInert(true);
     document.documentElement.classList.add("ptl-locked-active");
 
-    if (!overlayHost) {
-      overlayHost = document.createElement("div");
-      overlayHost.id = "ptl-lock-overlay-host";
-      shadowRoot = overlayHost.attachShadow({ mode: "closed" });
-      document.documentElement.appendChild(overlayHost);
-      renderPinView(lockStatus?.isLockedOut ? lockStatus.remainingSeconds : 0);
-    } else if (!document.documentElement.contains(overlayHost)) {
+    createOverlayHost(lockStatus);
+
+    if (!document.documentElement.contains(overlayHost)) {
       document.documentElement.appendChild(overlayHost);
       setTimeout(focusCurrentLockInput, 50);
     }

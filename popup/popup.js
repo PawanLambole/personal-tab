@@ -215,9 +215,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Active Tab View Logic
   async function loadActiveTabInfo() {
     try {
-      let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      let tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tabs || tabs.length === 0) {
-        tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       }
       const currentTab = tabs ? tabs[0] : null;
 
@@ -256,16 +256,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       unsupportedBanner.classList.add("hidden");
       tabStatusBadge.classList.remove("hidden");
 
-      const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
-      let isLocked = Boolean(lockedTabs[activeTabId]?.locked);
-      if (!isLocked && hostname) {
-        for (const data of Object.values(lockedTabs)) {
-          if (data.locked && data.hostname && data.hostname === hostname) {
-            isLocked = true;
-            break;
-          }
-        }
-      }
+      // Verify lock state with background worker
+      const statusRes = await chrome.runtime.sendMessage({
+        type: "CHECK_LOCK_STATUS",
+        tabId: activeTabId,
+        hostname
+      });
+
+      const isLocked = Boolean(statusRes && statusRes.isLocked);
       updateLockStatusState(isLocked);
     } catch (err) {
       showAlert("Error reading tab information.", "danger");
@@ -316,7 +314,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       const response = await chrome.runtime.sendMessage({
         type: "UNLOCK_TAB",
-        pin
+        tabId: activeTabId,
+        pin: pin.trim()
       });
 
       if (response && response.success) {

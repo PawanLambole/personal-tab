@@ -254,9 +254,20 @@ document.addEventListener("DOMContentLoaded", async () => {
 
             await chrome.storage.local.set({ lockedTabs: currentLocked });
 
+            // Notify all open tabs matching this host to remove lock screen
             try {
-              await chrome.tabs.sendMessage(tabId, { type: "REMOVE_LOCK_SCREEN" });
-            } catch (err) {}
+              const allTabs = await chrome.tabs.query({});
+              for (const t of allTabs) {
+                if (t.id && t.url) {
+                  try {
+                    const host = new URL(t.url).hostname;
+                    if (tabData?.hostname && host === tabData.hostname) {
+                      await chrome.tabs.sendMessage(t.id, { type: "REMOVE_LOCK_SCREEN" });
+                    }
+                  } catch (e) {}
+                }
+              }
+            } catch (e) {}
 
             showAlert("🔓 Tab unlocked!", "success");
             await loadLockedTabsList();
@@ -280,17 +291,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
 
       if (inputHash && inputHash === storage.pinHash) {
-        const currentLocked = storage.lockedTabs || {};
-        const tabIds = Object.keys(currentLocked);
-
         await chrome.storage.local.set({ lockedTabs: {} });
 
-        for (const idStr of tabIds) {
-          const id = parseInt(idStr, 10);
-          try {
-            await chrome.tabs.sendMessage(id, { type: "REMOVE_LOCK_SCREEN" });
-          } catch (err) {}
-        }
+        try {
+          const allTabs = await chrome.tabs.query({});
+          for (const t of allTabs) {
+            try {
+              await chrome.tabs.sendMessage(t.id, { type: "REMOVE_LOCK_SCREEN" });
+            } catch (err) {}
+          }
+        } catch (e) {}
 
         showAlert("🔓 All tabs unlocked successfully!", "success");
         await loadLockedTabsList();
@@ -314,17 +324,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       const inputHash = await TabLockerCrypto.hashValue(confirmText, storage.salt);
 
       if (inputHash && inputHash === storage.pinHash) {
-        const currentLocked = storage.lockedTabs || {};
-        const tabIds = Object.keys(currentLocked);
-
         await chrome.storage.local.clear();
 
-        for (const idStr of tabIds) {
-          const id = parseInt(idStr, 10);
-          try {
-            await chrome.tabs.sendMessage(id, { type: "REMOVE_LOCK_SCREEN" });
-          } catch (err) {}
-        }
+        try {
+          const allTabs = await chrome.tabs.query({});
+          for (const t of allTabs) {
+            try {
+              await chrome.tabs.sendMessage(t.id, { type: "REMOVE_LOCK_SCREEN" });
+            } catch (err) {}
+          }
+        } catch (e) {}
 
         alert("Extension has been completely reset.");
         window.location.reload();

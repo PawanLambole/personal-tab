@@ -8,7 +8,8 @@ importScripts("security/crypto.js");
  * Implements session unlock and reload auto-lock persistence.
  */
 
-// In-memory transient session unlocks (cleared on tab reload or navigation)
+// In-memory transient session unlocks (cleared on actual page reload or navigation away)
+// Maps tabId -> hostname of unlocked site
 const unlockedSessions = {};
 
 // Brute-force exponential backoff lockout thresholds
@@ -34,31 +35,24 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 /**
- * Tab Lifecycle: Clean up locked tabs record when closed.
+ * Tab Lifecycle: Clean up transient unlocked session state when a tab is closed.
+ * NOTE: lockedTabs is PERSISTENT and MUST NOT be deleted here!
+ * This ensures locked tabs and domains remain permanently protected across browser sessions and re-opens.
  */
-chrome.tabs.onRemoved.addListener(async (tabId) => {
+chrome.tabs.onRemoved.addListener((tabId) => {
   delete unlockedSessions[tabId];
-  const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
-  if (lockedTabs[tabId]) {
-    delete lockedTabs[tabId];
-    await chrome.storage.local.set({ lockedTabs });
-  }
 });
 
 /**
- * Tab Lifecycle: Check lock status on tab navigation / update.
- * Clears transient session unlock on page reload to re-enforce lock screen.
+ * Tab Lifecycle: Guard against chrome://extensions access if configured.
+ * Does NOT clear session unlock or spam SHOW_LOCK_SCREEN on SPA events (like in ChatGPT/YouTube),
+ * which would cause glitchy reload loops.
  */
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!tab || !tab.url) return;
   const url = tab.url.toLowerCase();
 
-  // Clear transient session unlock when page reloads or starts navigating
-  if (changeInfo.status === "loading") {
-    delete unlockedSessions[tabId];
-  }
-
-  // Optional Guard: Only block extension page if explicitly enabled in settings (default false)
+  // Guard: Block extension and settings pages if explicitly enabled in settings
   if (url.startsWith("chrome://extensions") || url.startsWith("chrome://settings")) {
     const { initialized, protectionEnabled, blockExtensionPage = false } = await chrome.storage.local.get([
       "initialized",
@@ -70,41 +64,6 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       try {
         await chrome.tabs.remove(tabId);
       } catch (e) {}
-      return;
-    }
-  }
-
-  // Only check lock status when page navigation finishes loading
-  if (changeInfo.status === "complete") {
-    const { lockedTabs = {}, protectionEnabled } = await chrome.storage.local.get(["lockedTabs", "protectionEnabled"]);
-    if (protectionEnabled === false) return;
-    if (unlockedSessions[tabId]) return;
-
-    let isLocked = Boolean(lockedTabs[tabId]?.locked);
-
-    if (!isLocked && tab && tab.url) {
-      try {
-        const host = new URL(tab.url).hostname;
-        for (const data of Object.values(lockedTabs)) {
-          if (data.locked && data.hostname && data.hostname === host) {
-            isLocked = true;
-            break;
-          }
-        }
-      } catch (e) {}
-    }
-
-    if (isLocked && isLockableUrl(tab.url)) {
-      try {
-        await chrome.tabs.sendMessage(tabId, { type: "SHOW_LOCK_SCREEN" });
-      } catch (err) {
-        try {
-          await chrome.scripting.executeScript({
-            target: { tabId },
-            files: ["content.js"]
-          });
-        } catch (scriptErr) {}
-      }
     }
   }
 });
@@ -211,17 +170,27 @@ async function handleMessage(message, sender) {
       }
 
       const tabId = message.tabId || sender?.tab?.id;
+      const targetHost = message.hostname || (sender?.tab?.url ? new URL(sender.tab.url).hostname : "");
+
+      // If an actual page reload occurred, clear transient session unlock
+      if (message.isReload && tabId) {
+        delete unlockedSessions[tabId];
+      }
+
+      // Check if session is already unlocked for this tab and host
       if (tabId && unlockedSessions[tabId]) {
-        return {
-          success: true,
-          isLocked: false
-        };
+        const sessionHost = unlockedSessions[tabId];
+        if (sessionHost === true || !targetHost || sessionHost === targetHost) {
+          return {
+            success: true,
+            isLocked: false
+          };
+        }
       }
 
       const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
       let isLocked = Boolean(lockedTabs[tabId]?.locked);
 
-      const targetHost = message.hostname || (sender?.tab?.url ? new URL(sender.tab.url).hostname : "");
       if (!isLocked && targetHost) {
         try {
           for (const data of Object.values(lockedTabs)) {
@@ -251,9 +220,9 @@ async function handleMessage(message, sender) {
         } catch (e) {}
       }
       if (!tab) {
-        let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        let tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tabs || tabs.length === 0) {
-          tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         }
         tab = tabs ? tabs[0] : null;
       }
@@ -279,7 +248,7 @@ async function handleMessage(message, sender) {
       lockedTabs[tab.id] = {
         locked: true,
         hostname,
-        title: tab.title || "Locked Tab",
+        title: tab.title || hostname || "Locked Tab",
         lockedAt: Date.now(),
         url: tab.url
       };
@@ -294,6 +263,11 @@ async function handleMessage(message, sender) {
             target: { tabId: tab.id },
             files: ["content.js"]
           });
+          setTimeout(async () => {
+            try {
+              await chrome.tabs.sendMessage(tab.id, { type: "SHOW_LOCK_SCREEN" });
+            } catch (err) {}
+          }, 60);
         } catch (scriptErr) {}
       }
 
@@ -308,9 +282,9 @@ async function handleMessage(message, sender) {
         } catch (e) {}
       }
       if (!tab) {
-        let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        let tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tabs || tabs.length === 0) {
-          tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         }
         tab = tabs ? tabs[0] : null;
       }
@@ -376,8 +350,13 @@ async function handleMessage(message, sender) {
         await chrome.storage.local.set({ failedAttempts: 0, lockoutUntil: 0 });
 
         const targetTabId = reqTabId || sender?.tab?.id;
+        let host = "";
+        try {
+          if (sender?.tab?.url) host = new URL(sender.tab.url).hostname;
+        } catch (e) {}
+
         if (targetTabId) {
-          unlockedSessions[targetTabId] = true;
+          unlockedSessions[targetTabId] = host || true;
           try {
             await chrome.tabs.sendMessage(targetTabId, { type: "REMOVE_LOCK_SCREEN" });
           } catch (e) {}
