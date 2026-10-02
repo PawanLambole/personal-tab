@@ -206,18 +206,21 @@ async function handleMessage(message, sender) {
       }
 
       const tabId = message.tabId || sender?.tab?.id;
-      if (tabId && unlockedSessions[tabId]) {
+      const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
+      let isLocked = Boolean(lockedTabs[tabId]?.locked);
+
+      // If it's explicitly locked in lockedTabs, it is LOCKED! Clear any stale unlocked session!
+      if (isLocked) {
+        if (tabId) delete unlockedSessions[tabId];
+      } else if (tabId && unlockedSessions[tabId]) {
         return {
           success: true,
           isLocked: false
         };
       }
 
-      const lockedTabs = storage.lockedTabs || {};
-      let isLocked = Boolean(lockedTabs[tabId]?.locked);
-
       const targetHost = message.hostname || (sender?.tab?.url ? new URL(sender.tab.url).hostname : "");
-      if (!isLocked && targetHost) {
+      if (!isLocked && targetHost && (!tabId || !unlockedSessions[tabId])) {
         try {
           for (const data of Object.values(lockedTabs)) {
             if (data.locked && data.hostname && data.hostname === targetHost) {
@@ -239,11 +242,19 @@ async function handleMessage(message, sender) {
     }
 
     case "LOCK_TAB": {
-      let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (!tabs || tabs.length === 0) {
-        tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      let tab = null;
+      if (message.tabId) {
+        try {
+          tab = await chrome.tabs.get(message.tabId);
+        } catch (e) {}
       }
-      const tab = tabs ? tabs[0] : null;
+      if (!tab) {
+        let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tabs || tabs.length === 0) {
+          tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        }
+        tab = tabs ? tabs[0] : null;
+      }
 
       if (!tab || !tab.id) {
         return { success: false, error: "No active tab detected." };
@@ -262,7 +273,7 @@ async function handleMessage(message, sender) {
 
       delete unlockedSessions[tab.id];
 
-      const lockedTabs = storage.lockedTabs || {};
+      const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
       lockedTabs[tab.id] = {
         locked: true,
         hostname,
@@ -288,11 +299,19 @@ async function handleMessage(message, sender) {
     }
 
     case "UNLOCK_TAB": {
-      let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (!tabs || tabs.length === 0) {
-        tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      let tab = null;
+      if (message.tabId) {
+        try {
+          tab = await chrome.tabs.get(message.tabId);
+        } catch (e) {}
       }
-      const tab = tabs ? tabs[0] : null;
+      if (!tab) {
+        let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (!tabs || tabs.length === 0) {
+          tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        }
+        tab = tabs ? tabs[0] : null;
+      }
 
       if (!tab || !tab.id) {
         return { success: false, error: "No active tab detected." };
@@ -310,7 +329,7 @@ async function handleMessage(message, sender) {
         hostname = new URL(tab.url).hostname;
       } catch (e) {}
 
-      const lockedTabs = storage.lockedTabs || {};
+      const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
       delete lockedTabs[tab.id];
       delete unlockedSessions[tab.id];
 

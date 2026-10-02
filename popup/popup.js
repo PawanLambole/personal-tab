@@ -215,9 +215,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Active Tab View Logic
   async function loadActiveTabInfo() {
     try {
-      let tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (!tabs || tabs.length === 0) {
-        tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       }
       const currentTab = tabs ? tabs[0] : null;
 
@@ -287,49 +287,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   btnLockTab.addEventListener("click", async () => {
-    if (!activeTabId || !activeTabObject) return;
+    if (!activeTabId) return;
 
     try {
-      let hostname = "";
-      try {
-        hostname = new URL(activeTabObject.url).hostname;
-      } catch (e) {
-        hostname = activeTabObject.url;
+      const response = await chrome.runtime.sendMessage({
+        type: "LOCK_TAB",
+        tabId: activeTabId
+      });
+
+      if (response && response.success) {
+        updateLockStatusState(true);
+        showAlert("🔒 Tab locked successfully!", "success");
+        setTimeout(hideAlert, 2000);
+      } else {
+        showAlert(response?.error || "Error locking tab.", "danger");
       }
-
-      const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
-      lockedTabs[activeTabId] = {
-        locked: true,
-        hostname,
-        title: activeTabObject.title || "Locked Tab",
-        lockedAt: Date.now(),
-        url: activeTabObject.url
-      };
-
-      await chrome.storage.local.set({ lockedTabs });
-
-      // Send message to content script or dynamically inject if pre-existing tab
-      try {
-        await chrome.tabs.sendMessage(activeTabId, { type: "SHOW_LOCK_SCREEN" });
-      } catch (e) {
-        if (chrome.scripting && chrome.scripting.executeScript) {
-          try {
-            await chrome.scripting.executeScript({
-              target: { tabId: activeTabId },
-              files: ["content.js"]
-            });
-            setTimeout(async () => {
-              try {
-                await chrome.tabs.sendMessage(activeTabId, { type: "SHOW_LOCK_SCREEN" });
-              } catch (scriptErr) {}
-            }, 100);
-          } catch (scriptErr) {}
-        }
-      }
-
-      updateLockStatusState(true);
-      showAlert("🔒 Tab locked successfully!", "success");
-      setTimeout(hideAlert, 2000);
     } catch (err) {
       showAlert("Error locking tab.", "danger");
     }
