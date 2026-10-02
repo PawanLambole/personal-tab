@@ -3,8 +3,8 @@
 /**
  * Personal Tab Locker - Content Script
  * Injected into http:// and https:// webpages.
- * Uses closed Shadow DOM, inert document isolation, and capture-phase focus/keyboard trapping
- * to ensure tab locking is completely secure, leak-proof, and does NOT cause hydration or reload crashes.
+ * Uses Shadow DOM and inert document isolation to ensure tab locking is completely secure,
+ * leak-proof, and does NOT cause reload loops or input jamming.
  */
 
 (function () {
@@ -20,7 +20,6 @@
   let shadowRoot = null;
   let countdownTimer = null;
   let isCurrentlyLocked = false;
-  let lockObserver = null;
   let lastLockStatus = null;
 
   window.__PTL_CHECK_LOCK__ = initTabLockCheck;
@@ -45,15 +44,11 @@
     }
   });
 
-  // Listen for DOM lifecycle events to re-enforce lock during reload parsing
-  document.addEventListener("readystatechange", () => {
-    if (isCurrentlyLocked) enforceLockScreen();
-  });
+  // Ensure underlying page is inert once DOM is ready
   document.addEventListener("DOMContentLoaded", () => {
-    if (isCurrentlyLocked) enforceLockScreen();
-  });
-  window.addEventListener("load", () => {
-    if (isCurrentlyLocked) enforceLockScreen();
+    if (isCurrentlyLocked) {
+      setUnderlyingPageInert(true);
+    }
   });
 
   // Listen for direct messages from background service worker or popup
@@ -67,48 +62,27 @@
     }
   });
 
-  // Global capture listeners to trap keyboard events and focus while locked
+  // Capture keystrokes aimed at underlying page while locked
   function onWindowKeyCapture(e) {
-    if (!isCurrentlyLocked) return;
-
-    const path = e.composedPath ? e.composedPath() : [];
-    const isFromOverlay = overlayHost && (path.includes(overlayHost) || e.target === overlayHost);
-
-    if (isFromOverlay) {
-      // Keystroke was typed inside the lock screen overlay input.
-      // Allow it to reach our input (do NOT stop propagation down to input in capture phase).
-      return;
-    }
-
-    // Keystroke was aimed at the underlying page while locked (e.g. ChatGPT prompt):
-    // Drop the event completely so host page never receives it!
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-
-    focusCurrentLockInput();
-  }
-
-  function onWindowFocusCapture(e) {
     if (!isCurrentlyLocked) return;
 
     const path = e.composedPath ? e.composedPath() : [];
     const isFromOverlay = overlayHost && path.includes(overlayHost);
 
-    if (!isFromOverlay) {
-      // Underlying page element tried to steal focus:
-      // Drop the event and refocus our overlay input
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      focusCurrentLockInput();
+    if (isFromOverlay) {
+      // Keystroke was typed inside our lock screen overlay input.
+      // Allow it to reach our input naturally without calling preventDefault!
+      return;
     }
+
+    // Keystroke was aimed at the underlying page (e.g. ChatGPT prompt textarea) while locked.
+    // Drop it completely so host page never receives it!
+    e.preventDefault();
+    e.stopPropagation();
+    focusCurrentLockInput();
   }
 
   window.addEventListener("keydown", onWindowKeyCapture, true);
-  window.addEventListener("keyup", onWindowKeyCapture, true);
-  window.addEventListener("keypress", onWindowKeyCapture, true);
-  window.addEventListener("focusin", onWindowFocusCapture, true);
-  window.addEventListener("focus", onWindowFocusCapture, true);
 
   function getActiveLockInput() {
     if (!shadowRoot) return null;
@@ -121,9 +95,9 @@
   }
 
   function focusCurrentLockInput() {
-    if (!isCurrentlyLocked) return;
+    if (!isCurrentlyLocked || !shadowRoot) return;
     const input = getActiveLockInput();
-    if (input) {
+    if (input && shadowRoot.activeElement !== input) {
       try {
         input.focus();
       } catch (e) {}
@@ -165,50 +139,7 @@
       } else {
         removeLockScreen();
       }
-    } catch (e) {
-      setTimeout(async () => {
-        try {
-          const storage = await chrome.storage.local.get(["protectionEnabled"]);
-          if (storage.protectionEnabled === false) {
-            removeLockScreen();
-            return;
-          }
-
-          const isReload = checkIsPageReload();
-
-          const payload = {
-            type: "CHECK_LOCK_STATUS",
-            isReload,
-            url: window.location.href,
-            hostname: window.location.hostname
-          };
-          const res = await chrome.runtime.sendMessage(payload);
-          if (res && res.isLocked) {
-            showLockScreen(res);
-          } else {
-            removeLockScreen();
-          }
-        } catch (err) {}
-      }, 300);
-    }
-  }
-
-  function setupMutationObserver() {
-    if (lockObserver) return;
-    lockObserver = new MutationObserver(() => {
-      if (isCurrentlyLocked) {
-        const missingHost = !overlayHost || !document.documentElement.contains(overlayHost);
-        const missingClass = !document.documentElement.classList.contains("ptl-locked-active");
-        if (missingHost || missingClass) {
-          enforceLockScreen();
-        }
-      }
-    });
-    lockObserver.observe(document.documentElement, {
-      childList: true,
-      attributes: true,
-      attributeFilter: ["class"]
-    });
+    } catch (e) {}
   }
 
   function setUnderlyingPageInert(active) {
@@ -227,51 +158,11 @@
     }
   }
 
-  function createOverlayHost(lockStatus) {
-    if (!overlayHost) {
-      overlayHost = document.createElement("div");
-      overlayHost.id = "ptl-lock-overlay-host";
-      const stopBubble = (e) => e.stopPropagation();
-      ["keydown", "keyup", "keypress"].forEach((evt) => {
-        overlayHost.addEventListener(evt, stopBubble);
-      });
-      shadowRoot = overlayHost.attachShadow({ mode: "closed" });
-      renderPinView(lockStatus?.isLockedOut ? lockStatus.remainingSeconds : 0);
-    }
-  }
-
-  function enforceLockScreen() {
-    if (!isCurrentlyLocked) return;
-    injectGlobalLockStyles();
-    setUnderlyingPageInert(true);
-
-    if (!document.documentElement.classList.contains("ptl-locked-active")) {
-      document.documentElement.classList.add("ptl-locked-active");
-    }
-
-    createOverlayHost(lastLockStatus);
-
-    if (!document.documentElement.contains(overlayHost)) {
-      document.documentElement.appendChild(overlayHost);
-      setTimeout(focusCurrentLockInput, 50);
-    }
-  }
-
   function injectGlobalLockStyles() {
     if (document.getElementById("ptl-global-lock-styles")) return;
     const style = document.createElement("style");
     style.id = "ptl-global-lock-styles";
     style.textContent = `
-      html.ptl-locked-active {
-        overflow: hidden !important;
-        height: 100% !important;
-      }
-      html.ptl-locked-active body {
-        overflow: hidden !important;
-        pointer-events: none !important;
-        user-select: none !important;
-        -webkit-user-select: none !important;
-      }
       #ptl-lock-overlay-host {
         position: fixed !important;
         top: 0 !important;
@@ -299,21 +190,42 @@
   }
 
   function showLockScreen(lockStatus) {
+    // If lock screen is already active and displaying, do NOT re-create or wipe DOM!
+    if (isCurrentlyLocked && overlayHost && document.documentElement.contains(overlayHost)) {
+      return;
+    }
+
     isCurrentlyLocked = true;
     lastLockStatus = lockStatus;
 
     injectGlobalLockStyles();
     setUnderlyingPageInert(true);
-    document.documentElement.classList.add("ptl-locked-active");
 
-    createOverlayHost(lockStatus);
+    // Clean up any stray duplicate element in DOM
+    const existing = document.getElementById("ptl-lock-overlay-host");
+    if (existing && existing !== overlayHost) {
+      existing.remove();
+    }
+
+    if (!overlayHost) {
+      overlayHost = document.createElement("div");
+      overlayHost.id = "ptl-lock-overlay-host";
+
+      // Stop all keyboard events from bubbling out of overlayHost to host page (ChatGPT) listeners
+      const stopBubble = (e) => e.stopPropagation();
+      ["keydown", "keyup", "keypress"].forEach((evt) => {
+        overlayHost.addEventListener(evt, stopBubble);
+      });
+
+      shadowRoot = overlayHost.attachShadow({ mode: "open" });
+      renderPinView(lockStatus?.isLockedOut ? lockStatus.remainingSeconds : 0);
+    }
 
     if (!document.documentElement.contains(overlayHost)) {
       document.documentElement.appendChild(overlayHost);
-      setTimeout(focusCurrentLockInput, 50);
     }
 
-    setupMutationObserver();
+    setTimeout(focusCurrentLockInput, 50);
   }
 
   function removeLockScreen() {
@@ -325,12 +237,6 @@
       countdownTimer = null;
     }
 
-    if (lockObserver) {
-      lockObserver.disconnect();
-      lockObserver = null;
-    }
-
-    document.documentElement.classList.remove("ptl-locked-active");
     removeGlobalLockStyles();
     setUnderlyingPageInert(false);
 
@@ -514,6 +420,11 @@
 
   function renderPinView(lockoutRemaining = 0) {
     if (!shadowRoot) return;
+
+    const existingInput = shadowRoot.getElementById("pin-input");
+    if (existingInput && lockoutRemaining === 0) {
+      return;
+    }
 
     shadowRoot.innerHTML = `
       <style>${getShadowStyles()}</style>
