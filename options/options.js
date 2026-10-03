@@ -3,6 +3,7 @@
 /**
  * Personal Tab Locker - Options Dashboard Script
  * Direct, resilient interface for settings, Master Protection toggle, and tab management.
+ * Protects sensitive tab lists by strictly deferring DOM population until password authentication passes.
  */
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -33,10 +34,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Danger Zone Elements
   const btnResetExtension = document.getElementById("btn-reset-extension");
 
+  let isDashboardAuthenticated = false;
+
   // Real-time Storage Listener to auto-update Locked Tabs card live
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === "local") {
-      if (changes.lockedTabs) {
+      if (changes.lockedTabs && isDashboardAuthenticated) {
         loadLockedTabsList();
       }
       if (changes.protectionEnabled !== undefined) {
@@ -79,18 +82,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   function hideSettingsContent() {
+    isDashboardAuthenticated = false;
     document.querySelectorAll(".options-grid > section:not(#options-lock-card)").forEach((sec) => {
       sec.classList.add("hidden");
     });
     optionsLockCard.classList.remove("hidden");
+    if (lockedTabsList) lockedTabsList.innerHTML = "";
     setTimeout(() => inputOptionsAuthPin?.focus(), 50);
   }
 
   function showSettingsContent() {
+    isDashboardAuthenticated = true;
     optionsLockCard.classList.add("hidden");
     document.querySelectorAll(".options-grid > section:not(#options-lock-card)").forEach((sec) => {
       sec.classList.remove("hidden");
     });
+    // Securely populate data only after authentication succeeds
+    initMasterSwitch();
+    loadLockedTabsList();
   }
 
   formOptionsAuth.addEventListener("submit", async (e) => {
@@ -100,9 +109,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!pin) return;
 
     const storage = await chrome.storage.local.get(["salt", "pinHash"]);
-    const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+    const isValid = await TabLockerCrypto.verifyPassword(pin, storage.pinHash, storage.salt);
 
-    if (inputHash === storage.pinHash) {
+    if (isValid) {
       showSettingsContent();
     } else {
       optionsAuthError.textContent = "Incorrect password. Access denied.";
@@ -111,10 +120,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       inputOptionsAuthPin.focus();
     }
   });
-
-  // Initial Load
-  await initMasterSwitch();
-  await loadLockedTabsList();
 
   async function initMasterSwitch() {
     const { protectionEnabled, blockExtensionPage = false } = await chrome.storage.local.get([
@@ -155,9 +160,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (pin === null || !pin.trim()) return;
 
       const storage = await chrome.storage.local.get(["salt", "pinHash"]);
-      const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+      const isValid = await TabLockerCrypto.verifyPassword(pin, storage.pinHash, storage.salt);
 
-      if (inputHash && inputHash === storage.pinHash) {
+      if (isValid) {
         await chrome.storage.local.set({ protectionEnabled: false });
         updateOptMasterSwitchUI(false);
         showAlert("⏸️ Master Protection turned OFF. Tab locks paused.", "success");
@@ -171,7 +176,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Change Password Handler
+  // Change Password Handler (Upgrades hash to PBKDF2)
   formChangePin.addEventListener("submit", async (e) => {
     e.preventDefault();
     hideAlert();
@@ -192,13 +197,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     try {
       const storage = await chrome.storage.local.get(["salt", "pinHash"]);
-      const currentInputHash = await TabLockerCrypto.hashValue(currentPin, storage.salt);
+      const isValid = await TabLockerCrypto.verifyPassword(currentPin, storage.pinHash, storage.salt);
 
-      if (currentInputHash && currentInputHash === storage.pinHash) {
-        const newPinHash = await TabLockerCrypto.hashValue(newPin, storage.salt);
+      if (isValid) {
+        const newPinHash = await TabLockerCrypto.hashPassword(newPin, storage.salt);
         await chrome.storage.local.set({ pinHash: newPinHash });
 
-        showAlert("✓ Password successfully updated!", "success");
+        showAlert("✓ Password successfully updated with PBKDF2 encryption!", "success");
         formChangePin.reset();
       } else {
         showAlert("Incorrect current password.", "danger");
@@ -221,9 +226,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     try {
       const storage = await chrome.storage.local.get(["salt", "pinHash"]);
-      const currentInputHash = await TabLockerCrypto.hashValue(currentPin, storage.salt);
+      const isValid = await TabLockerCrypto.verifyPassword(currentPin, storage.pinHash, storage.salt);
 
-      if (currentInputHash && currentInputHash === storage.pinHash) {
+      if (isValid) {
         const rawNewKey = TabLockerCrypto.generateRecoveryKey();
         const newRecoveryKeyHash = await TabLockerCrypto.hashValue(rawNewKey, storage.salt);
 
@@ -254,8 +259,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
-  // Load Locked Tabs List
+  // Load Locked Tabs List (Only executed when authenticated)
   async function loadLockedTabsList() {
+    if (!isDashboardAuthenticated) return;
+
     try {
       const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
       const activeList = [];
@@ -301,9 +308,9 @@ document.addEventListener("DOMContentLoaded", async () => {
           if (pin === null || !pin.trim()) return;
 
           const storage = await chrome.storage.local.get(["salt", "pinHash", "lockedTabs"]);
-          const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+          const isValid = await TabLockerCrypto.verifyPassword(pin, storage.pinHash, storage.salt);
 
-          if (inputHash && inputHash === storage.pinHash) {
+          if (isValid) {
             const currentLocked = storage.lockedTabs || {};
             const tabData = currentLocked[tabId];
             delete currentLocked[tabId];
@@ -314,7 +321,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                   delete currentLocked[id];
                   try {
                     await chrome.tabs.sendMessage(parseInt(id, 10), { type: "REMOVE_LOCK_SCREEN" });
-                  } catch (e) {}
+                  } catch (err) {}
                 }
               }
             }
@@ -331,10 +338,10 @@ document.addEventListener("DOMContentLoaded", async () => {
                     if (tabData?.hostname && host === tabData.hostname) {
                       await chrome.tabs.sendMessage(t.id, { type: "REMOVE_LOCK_SCREEN" });
                     }
-                  } catch (e) {}
+                  } catch (err) {}
                 }
               }
-            } catch (e) {}
+            } catch (err) {}
 
             showAlert("🔓 Tab unlocked!", "success");
             await loadLockedTabsList();
@@ -354,10 +361,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (pin === null || !pin.trim()) return;
 
     try {
-      const storage = await chrome.storage.local.get(["salt", "pinHash", "lockedTabs"]);
-      const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+      const storage = await chrome.storage.local.get(["salt", "pinHash"]);
+      const isValid = await TabLockerCrypto.verifyPassword(pin, storage.pinHash, storage.salt);
 
-      if (inputHash && inputHash === storage.pinHash) {
+      if (isValid) {
         await chrome.storage.local.set({ lockedTabs: {} });
 
         try {
@@ -388,10 +395,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     try {
       const storage = await chrome.storage.local.get(["salt", "pinHash"]);
-      const inputHash = await TabLockerCrypto.hashValue(confirmText, storage.salt);
+      const isValid = await TabLockerCrypto.verifyPassword(confirmText, storage.pinHash, storage.salt);
 
-      if (inputHash && inputHash === storage.pinHash) {
-        await chrome.storage.local.clear();
+      if (isValid) {
+        await chrome.runtime.sendMessage({ type: "RESET_ALL_DATA" });
 
         try {
           const allTabs = await chrome.tabs.query({});

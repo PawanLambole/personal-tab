@@ -2,11 +2,13 @@
 
 /**
  * Personal Tab Locker - Cryptography and Security Utilities
- * Uses Web Crypto API for secure hashing and random value generation.
+ * Uses Web Crypto API for secure hashing, PBKDF2 key derivation, and random value generation.
  * All computations stay strictly local to the user's browser.
  */
 
 var TabLockerCrypto = (function () {
+  const PBKDF2_ITERATIONS = 100000;
+
   /**
    * Generates a cryptographically secure random salt hex string.
    * @returns {string} 32-character hex salt string
@@ -20,8 +22,86 @@ var TabLockerCrypto = (function () {
   }
 
   /**
-   * Hashes a secret value (Password or Recovery Key) with a salt using SHA-256.
-   * Safely returns empty string if input is empty/invalid.
+   * Derives a cryptographic key using PBKDF2-HMAC-SHA256.
+   * @param {string} password Plaintext password
+   * @param {string} saltHex 32-char hex salt
+   * @param {number} iterations Iteration count
+   * @returns {Promise<string>} Hex representation of derived 256-bit key
+   */
+  async function derivePBKDF2(password, saltHex, iterations = PBKDF2_ITERATIONS) {
+    if (typeof password !== "string" || !password.trim()) return "";
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(password.trim()),
+      { name: "PBKDF2" },
+      false,
+      ["deriveBits"]
+    );
+
+    // Convert hex salt to Uint8Array safely
+    let saltBytes;
+    try {
+      const matches = saltHex.match(/.{1,2}/g) || [];
+      saltBytes = new Uint8Array(matches.map(byte => parseInt(byte, 16)));
+      if (saltBytes.length === 0) saltBytes = enc.encode(saltHex || "ptl-default-salt");
+    } catch (e) {
+      saltBytes = enc.encode(saltHex || "ptl-default-salt");
+    }
+
+    const derivedBits = await crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        salt: saltBytes,
+        iterations: iterations,
+        hash: "SHA-256"
+      },
+      keyMaterial,
+      256
+    );
+
+    return Array.from(new Uint8Array(derivedBits))
+      .map(b => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  /**
+   * Hashes a password using PBKDF2 with salt.
+   * @param {string} password Plaintext password
+   * @param {string} salt Salt string
+   * @returns {Promise<string>} Format: pbkdf2:<iterations>:<hexDigest>
+   */
+  async function hashPassword(password, salt = "") {
+    if (!password || !password.trim()) return "";
+    const digest = await derivePBKDF2(password, salt, PBKDF2_ITERATIONS);
+    return `pbkdf2:${PBKDF2_ITERATIONS}:${digest}`;
+  }
+
+  /**
+   * Verifies a password against a stored hash (supports both PBKDF2 and legacy SHA-256).
+   * @param {string} password Plaintext password to verify
+   * @param {string} storedHash Stored hash string
+   * @param {string} salt Salt string
+   * @returns {Promise<boolean>}
+   */
+  async function verifyPassword(password, storedHash, salt = "") {
+    if (!password || !storedHash) return false;
+
+    if (storedHash.startsWith("pbkdf2:")) {
+      const parts = storedHash.split(":");
+      const iterations = parseInt(parts[1], 10) || PBKDF2_ITERATIONS;
+      const expected = parts[2];
+      const computed = await derivePBKDF2(password, salt, iterations);
+      return computed === expected;
+    }
+
+    // Legacy SHA-256 fallback for existing installations
+    const legacy = await hashValue(password, salt);
+    return legacy === storedHash;
+  }
+
+  /**
+   * Hashes a secret value with a salt using SHA-256 (used for recovery keys and backward compatibility).
    * @param {string} value Plaintext value to hash
    * @param {string} salt Salt string
    * @returns {Promise<string>} Hex representation of SHA-256 hash
@@ -96,6 +176,9 @@ var TabLockerCrypto = (function () {
 
   return {
     generateSalt,
+    derivePBKDF2,
+    hashPassword,
+    verifyPassword,
     hashValue,
     isValidPassword,
     isValidPIN,

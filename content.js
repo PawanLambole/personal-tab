@@ -5,6 +5,7 @@
  * Injected into http:// and https:// webpages.
  * Uses Shadow DOM and inert document isolation to ensure tab locking is completely secure,
  * leak-proof, and does NOT cause reload loops or input jamming.
+ * Features synchronous pre-cloaking at document_start to guarantee zero visual content leaks.
  */
 
 (function () {
@@ -16,11 +17,43 @@
   }
   window.__PTL_CONTENT_SCRIPT_INITIALIZED__ = true;
 
+  // Immediately inject synchronous cloak style to guarantee zero visual leak while checking lock status
+  function applyPreCloak() {
+    if (document.getElementById("ptl-precheck-cloak")) return;
+    const preCloakStyle = document.createElement("style");
+    preCloakStyle.id = "ptl-precheck-cloak";
+    preCloakStyle.textContent = `
+      html[data-ptl-checking="true"] {
+        visibility: hidden !important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(preCloakStyle);
+    if (document.documentElement) {
+      document.documentElement.setAttribute("data-ptl-checking", "true");
+    }
+  }
+
+  function removePreCloak() {
+    if (document.documentElement) {
+      document.documentElement.removeAttribute("data-ptl-checking");
+    }
+    const el = document.getElementById("ptl-precheck-cloak");
+    if (el && el.parentNode) {
+      el.parentNode.removeChild(el);
+    }
+  }
+
+  applyPreCloak();
+  // Failsafe: Never keep page blank for more than 400ms if extension communication lags
+  setTimeout(removePreCloak, 400);
+
   let overlayHost = null;
   let shadowRoot = null;
   let countdownTimer = null;
   let isCurrentlyLocked = false;
+  let isSessionUnlocked = false;
   let lastLockStatus = null;
+  let domGuardianObserver = null;
 
   window.__PTL_CHECK_LOCK__ = initTabLockCheck;
 
@@ -46,6 +79,9 @@
     document.addEventListener("DOMContentLoaded", () => {
       if (isCurrentlyLocked) {
         setUnderlyingPageInert(true);
+        if (overlayHost && document.documentElement && document.documentElement.lastElementChild !== overlayHost) {
+          document.documentElement.appendChild(overlayHost);
+        }
         focusCurrentLockInput();
       }
     });
@@ -62,9 +98,9 @@
     }
   });
 
-  // Real-time SPA navigation watcher (e.g. switching between chats in ChatGPT)
+  // Real-time SPA navigation watcher (e.g. switching between chats in ChatGPT or videos in YouTube)
   let lastObservedUrl = window.location.href;
-  setInterval(() => {
+  function handleUrlChange() {
     if (!isCurrentlyLocked) {
       const current = window.location.href;
       if (current !== lastObservedUrl) {
@@ -72,7 +108,11 @@
         initTabLockCheck();
       }
     }
-  }, 350);
+  }
+
+  setInterval(handleUrlChange, 150);
+  window.addEventListener("popstate", handleUrlChange, true);
+  window.addEventListener("click", () => setTimeout(handleUrlChange, 50), true);
 
   // Capture keystrokes aimed at underlying page while locked
   function onWindowKeyCapture(e) {
@@ -151,12 +191,43 @@
     return false;
   }
 
+  function getLockoutStatus(lockoutUntil = 0) {
+    const now = Date.now();
+    if (lockoutUntil && lockoutUntil > now) {
+      const remainingSeconds = Math.ceil((lockoutUntil - now) / 1000);
+      return { isLockedOut: true, remainingSeconds };
+    }
+    return { isLockedOut: false, remainingSeconds: 0 };
+  }
+
   async function initTabLockCheck() {
     try {
-      const storage = await chrome.storage.local.get(["protectionEnabled"]);
+      const storage = await chrome.storage.local.get(["protectionEnabled", "lockedTabs", "lockoutUntil"]);
       if (storage.protectionEnabled === false) {
         removeLockScreen();
+        removePreCloak();
         return;
+      }
+
+      const hostname = window.location.hostname;
+      const targetNorm = hostname ? hostname.toLowerCase().replace(/^www\./, "") : "";
+      const lockedTabs = storage.lockedTabs || {};
+
+      let isDomainLocked = false;
+      if (targetNorm) {
+        for (const data of Object.values(lockedTabs)) {
+          const dataNorm = data.hostname ? data.hostname.toLowerCase().replace(/^www\./, "") : "";
+          if (data.locked && dataNorm === targetNorm) {
+            isDomainLocked = true;
+            break;
+          }
+        }
+      }
+
+      // Pre-show lock screen on initial load (prevents flash of webpage!).
+      if (isDomainLocked && !isSessionUnlocked) {
+        const lockout = getLockoutStatus(storage.lockoutUntil);
+        showLockScreen({ isLocked: true, ...lockout });
       }
 
       const isReload = checkIsPageReload();
@@ -173,7 +244,11 @@
       } else {
         removeLockScreen();
       }
-    } catch (e) {}
+    } catch (e) {
+      // In case of error, do not keep pre-cloak stuck
+    } finally {
+      removePreCloak();
+    }
   }
 
   function setUnderlyingPageInert(active) {
@@ -223,17 +298,58 @@
     }
   }
 
+  // Tamper-resistant DOM Guardian to prevent host page scripts from removing overlay or inert
+  function startDomGuardian() {
+    if (domGuardianObserver) return;
+    domGuardianObserver = new MutationObserver(() => {
+      if (!isCurrentlyLocked) return;
+
+      // Re-attach overlay if removed by host page scripts
+      if (overlayHost && document.documentElement && !document.documentElement.contains(overlayHost)) {
+        document.documentElement.appendChild(overlayHost);
+      }
+
+      // Re-apply inert if stripped by host page scripts
+      if (document.body && !document.body.hasAttribute("inert")) {
+        setUnderlyingPageInert(true);
+      }
+    });
+
+    try {
+      domGuardianObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["inert", "style", "class"]
+      });
+    } catch (e) {}
+  }
+
+  function stopDomGuardian() {
+    if (domGuardianObserver) {
+      domGuardianObserver.disconnect();
+      domGuardianObserver = null;
+    }
+  }
+
   function showLockScreen(lockStatus) {
+    removePreCloak();
+
     // If lock screen is already active and displaying, do NOT re-create or wipe DOM!
-    if (isCurrentlyLocked && overlayHost && document.documentElement.contains(overlayHost)) {
+    if (isCurrentlyLocked && overlayHost && document.documentElement && document.documentElement.contains(overlayHost)) {
+      if (document.documentElement.lastElementChild !== overlayHost) {
+        document.documentElement.appendChild(overlayHost);
+      }
       return;
     }
 
     isCurrentlyLocked = true;
+    isSessionUnlocked = false;
     lastLockStatus = lockStatus;
 
     injectGlobalLockStyles();
     setUnderlyingPageInert(true);
+    startDomGuardian();
 
     // Clean up any stray duplicate element in DOM
     const existing = document.getElementById("ptl-lock-overlay-host");
@@ -245,7 +361,7 @@
       overlayHost = document.createElement("div");
       overlayHost.id = "ptl-lock-overlay-host";
 
-      // Stop all keyboard events from bubbling out of overlayHost to host page (ChatGPT) listeners
+      // Stop all keyboard events from bubbling out of overlayHost to host page listeners
       const stopBubble = (e) => e.stopPropagation();
       ["keydown", "keyup", "keypress"].forEach((evt) => {
         overlayHost.addEventListener(evt, stopBubble);
@@ -255,13 +371,35 @@
       renderPinView(lockStatus?.isLockedOut ? lockStatus.remainingSeconds : 0);
     }
 
-    if (!document.documentElement.contains(overlayHost)) {
-      document.documentElement.appendChild(overlayHost);
+    // Direct, CSP-proof inline styles with !important so host page styles/CSPs can NEVER hide it
+    overlayHost.style.setProperty("position", "fixed", "important");
+    overlayHost.style.setProperty("top", "0", "important");
+    overlayHost.style.setProperty("left", "0", "important");
+    overlayHost.style.setProperty("right", "0", "important");
+    overlayHost.style.setProperty("bottom", "0", "important");
+    overlayHost.style.setProperty("width", "100vw", "important");
+    overlayHost.style.setProperty("height", "100vh", "important");
+    overlayHost.style.setProperty("z-index", "2147483647", "important");
+    overlayHost.style.setProperty("display", "block", "important");
+    overlayHost.style.setProperty("visibility", "visible", "important");
+    overlayHost.style.setProperty("opacity", "1", "important");
+    overlayHost.style.setProperty("pointer-events", "auto", "important");
+    overlayHost.style.setProperty("background-color", "#0f172a", "important");
+    overlayHost.style.setProperty("margin", "0", "important");
+    overlayHost.style.setProperty("padding", "0", "important");
+    overlayHost.style.setProperty("border", "none", "important");
+
+    if (document.documentElement) {
+      if (!document.documentElement.contains(overlayHost) || document.documentElement.lastElementChild !== overlayHost) {
+        document.documentElement.appendChild(overlayHost);
+      }
     }
 
-    // Dynamically attach keyboard and focus guards
+    // Dynamically attach keyboard, input, and focus guards
     window.removeEventListener("keydown", onWindowKeyCapture, true);
     window.addEventListener("keydown", onWindowKeyCapture, true);
+    window.removeEventListener("beforeinput", onWindowKeyCapture, true);
+    window.addEventListener("beforeinput", onWindowKeyCapture, true);
     window.removeEventListener("focusin", onWindowFocusCapture, true);
     window.addEventListener("focusin", onWindowFocusCapture, true);
 
@@ -270,10 +408,14 @@
 
   function removeLockScreen() {
     isCurrentlyLocked = false;
+    isSessionUnlocked = true;
     lastLockStatus = null;
+
+    stopDomGuardian();
 
     // Dynamically remove keyboard and focus guards
     window.removeEventListener("keydown", onWindowKeyCapture, true);
+    window.removeEventListener("beforeinput", onWindowKeyCapture, true);
     window.removeEventListener("focusin", onWindowFocusCapture, true);
 
     if (countdownTimer) {
@@ -283,6 +425,7 @@
 
     removeGlobalLockStyles();
     setUnderlyingPageInert(false);
+    removePreCloak();
 
     if (overlayHost && overlayHost.parentNode) {
       overlayHost.parentNode.removeChild(overlayHost);
@@ -515,6 +658,10 @@
     const errorBox = shadowRoot.getElementById("error-box");
     const forgotBtn = shadowRoot.getElementById("forgot-btn");
     const container = shadowRoot.querySelector(".lock-container");
+    if (container) {
+      container.style.cssText =
+        "position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;background:#0f172a!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:20px!important;box-sizing:border-box!important;z-index:2147483647!important;";
+    }
 
     // Shield events inside the shadow root from bubbling to host page
     const stopBubble = (e) => e.stopPropagation();
@@ -571,6 +718,10 @@
 
     forgotBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (countdownTimer) {
+        clearInterval(countdownTimer);
+        countdownTimer = null;
+      }
       renderRecoveryView();
     });
   }
@@ -616,6 +767,10 @@
     const errorBox = shadowRoot.getElementById("error-box");
     const backBtn = shadowRoot.getElementById("back-pin-btn");
     const container = shadowRoot.querySelector(".lock-container");
+    if (container) {
+      container.style.cssText =
+        "position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;background:#0f172a!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:20px!important;box-sizing:border-box!important;z-index:2147483647!important;";
+    }
 
     const stopBubble = (e) => e.stopPropagation();
     ["keydown", "keyup", "keypress", "input", "change"].forEach((evt) => {
@@ -717,6 +872,10 @@
     const confirmPinInput = shadowRoot.getElementById("confirm-pin-input");
     const errorBox = shadowRoot.getElementById("error-box");
     const container = shadowRoot.querySelector(".lock-container");
+    if (container) {
+      container.style.cssText =
+        "position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;background:#0f172a!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:20px!important;box-sizing:border-box!important;z-index:2147483647!important;";
+    }
 
     const stopBubble = (e) => e.stopPropagation();
     ["keydown", "keyup", "keypress", "input", "change"].forEach((evt) => {

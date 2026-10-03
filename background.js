@@ -5,12 +5,51 @@ importScripts("security/crypto.js");
 /**
  * Personal Tab Locker - Background Service Worker
  * Manages tab lock state, rate limiting, and dual tabId + hostname matching.
- * Implements session unlock and reload auto-lock persistence.
+ * Implements session unlock via chrome.storage.session and reload auto-lock persistence.
  */
 
-// In-memory transient session unlocks (cleared on actual page reload or navigation away)
-// Maps tabId -> hostname of unlocked site
-const unlockedSessions = {};
+// In-memory cache for fast synchronous lookups, synced to chrome.storage.session
+let unlockedSessions = {};
+
+// Initialize session cache from chrome.storage.session (persists across service worker restarts)
+async function initSessionCache() {
+  if (chrome.storage && chrome.storage.session) {
+    try {
+      const res = await chrome.storage.session.get("unlockedSessions");
+      if (res && res.unlockedSessions) {
+        unlockedSessions = res.unlockedSessions;
+      }
+    } catch (e) {}
+  }
+}
+initSessionCache();
+
+async function setSessionUnlock(tabId, data) {
+  unlockedSessions[tabId] = data;
+  if (chrome.storage && chrome.storage.session) {
+    try {
+      await chrome.storage.session.set({ unlockedSessions });
+    } catch (e) {}
+  }
+}
+
+async function removeSessionUnlock(tabId) {
+  delete unlockedSessions[tabId];
+  if (chrome.storage && chrome.storage.session) {
+    try {
+      await chrome.storage.session.set({ unlockedSessions });
+    } catch (e) {}
+  }
+}
+
+async function clearAllSessionUnlocks() {
+  unlockedSessions = {};
+  if (chrome.storage && chrome.storage.session) {
+    try {
+      await chrome.storage.session.remove("unlockedSessions");
+    } catch (e) {}
+  }
+}
 
 // Brute-force exponential backoff lockout thresholds
 const LOCKOUT_RULES = [
@@ -37,16 +76,14 @@ chrome.runtime.onInstalled.addListener(async () => {
 /**
  * Tab Lifecycle: Clean up transient unlocked session state when a tab is closed.
  * NOTE: lockedTabs is PERSISTENT and MUST NOT be deleted here!
- * This ensures locked tabs and domains remain permanently protected across browser sessions and re-opens.
  */
-chrome.tabs.onRemoved.addListener((tabId) => {
-  delete unlockedSessions[tabId];
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await removeSessionUnlock(tabId);
 });
 
 /**
- * Tab Lifecycle: Guard against chrome://extensions access if configured.
- * Does NOT clear session unlock or spam SHOW_LOCK_SCREEN on SPA events (like in ChatGPT/YouTube),
- * which would cause glitchy reload loops.
+ * Tab Lifecycle: Guard against chrome://extensions access if configured,
+ * and detect SPA route/conversation transitions.
  */
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (!tab || !tab.url) return;
@@ -68,7 +105,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     return;
   }
 
-  // Handle SPA in-page navigation (e.g. switching between chats in ChatGPT)
+  // Handle SPA in-page navigation (e.g. switching between chats in ChatGPT or videos in YouTube)
   if (changeInfo.url) {
     const { protectionEnabled, lockedTabs = {}, lockoutUntil = 0 } = await chrome.storage.local.get([
       "protectionEnabled",
@@ -94,22 +131,25 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
 
     if (isDomainLocked) {
+      await initSessionCache();
       const session = unlockedSessions[tabId];
       const sessionUrl = typeof session === "object" ? session.url : "";
       const sessionKey = getConversationKey(sessionUrl);
       const newKey = getConversationKey(changeInfo.url);
 
-      // If user navigated to a different conversation/chat path, lock the tab again!
-      if (!session || (sessionKey && newKey && sessionKey !== newKey)) {
-        delete unlockedSessions[tabId];
+      if (session) {
+        // If user navigated to a different conversation/route path, lock the tab again!
+        if (sessionKey && newKey && sessionKey !== newKey) {
+          await removeSessionUnlock(tabId);
 
-        const lockout = getLockoutStatus(lockoutUntil);
-        try {
-          await chrome.tabs.sendMessage(tabId, {
-            type: "SHOW_LOCK_SCREEN",
-            lockStatus: { isLocked: true, ...lockout }
-          });
-        } catch (e) {}
+          const lockout = getLockoutStatus(lockoutUntil);
+          try {
+            await chrome.tabs.sendMessage(tabId, {
+              type: "SHOW_LOCK_SCREEN",
+              lockStatus: { isLocked: true, ...lockout }
+            });
+          } catch (e) {}
+        }
       }
     }
   }
@@ -124,9 +164,8 @@ function isLockableUrl(url) {
 }
 
 /**
- * Normalizes a URL to a distinct conversation or page key.
- * Strips query parameters and hash fragments so switching chats in SPAs like ChatGPT
- * (e.g. /c/uuid-1 to /c/uuid-2) triggers a distinct key, while scrolling or typing in the same chat does not.
+ * Normalizes a URL to a distinct conversation or page route key.
+ * Preserves route-significant query parameters and hash routes (e.g. ?v=... on YouTube, #/route in SPAs).
  */
 function getConversationKey(urlStr) {
   if (!urlStr || typeof urlStr !== "string") return "";
@@ -134,7 +173,27 @@ function getConversationKey(urlStr) {
     const u = new URL(urlStr);
     const hostNorm = u.hostname.toLowerCase().replace(/^www\./, "");
     const pathNorm = u.pathname.replace(/\/+$/, "");
-    return `${hostNorm}${pathNorm}`;
+
+    let queryPart = "";
+    if (u.searchParams) {
+      const significantKeys = ["v", "tab", "chat", "c", "conversation_id", "id", "channel"];
+      const parts = [];
+      for (const k of significantKeys) {
+        if (u.searchParams.has(k)) {
+          parts.push(`${k}=${u.searchParams.get(k)}`);
+        }
+      }
+      if (parts.length > 0) {
+        queryPart = `?${parts.join("&")}`;
+      }
+    }
+
+    let hashPart = "";
+    if (u.hash && u.hash.startsWith("#/")) {
+      hashPart = u.hash.split("?")[0];
+    }
+
+    return `${hostNorm}${pathNorm}${queryPart}${hashPart}`;
   } catch (e) {
     return urlStr;
   }
@@ -153,6 +212,39 @@ function getLockoutStatus(lockoutUntil = 0) {
 }
 
 /**
+ * Universal helper to record a failed authentication attempt with exponential backoff.
+ */
+async function recordFailedAttempt(storage) {
+  const failedAttempts = (storage.failedAttempts || 0) + 1;
+  let newLockoutUntil = 0;
+  let lockoutSeconds = 0;
+
+  for (const rule of LOCKOUT_RULES) {
+    if (failedAttempts >= rule.failedThreshold) {
+      lockoutSeconds = rule.lockoutSeconds;
+    }
+  }
+
+  if (lockoutSeconds > 0) {
+    newLockoutUntil = Date.now() + lockoutSeconds * 1000;
+  }
+
+  await chrome.storage.local.set({
+    failedAttempts,
+    lockoutUntil: newLockoutUntil
+  });
+
+  return getLockoutStatus(newLockoutUntil);
+}
+
+/**
+ * Resets failed attempt counter upon successful authentication.
+ */
+async function resetFailedAttempts() {
+  await chrome.storage.local.set({ failedAttempts: 0, lockoutUntil: 0 });
+}
+
+/**
  * Message handler for extension components and content scripts.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -165,6 +257,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function handleMessage(message, sender) {
+  await initSessionCache();
+
   const storage = await chrome.storage.local.get([
     "initialized",
     "protectionEnabled",
@@ -193,7 +287,7 @@ async function handleMessage(message, sender) {
       const targetTabId = targetTab.id;
       const isSupported = isLockableUrl(targetTab.url);
       const lockedTabs = storage.lockedTabs || {};
-      
+
       let isLocked = Boolean(lockedTabs[targetTabId]?.locked);
       let hostname = "";
       try {
@@ -240,7 +334,7 @@ async function handleMessage(message, sender) {
 
       // If an actual page reload occurred, clear transient session unlock
       if (message.isReload && tabId) {
-        delete unlockedSessions[tabId];
+        await removeSessionUnlock(tabId);
       }
 
       // Check if session is already unlocked for this tab and host
@@ -254,7 +348,7 @@ async function handleMessage(message, sender) {
         const currentKey = getConversationKey(currentUrl);
 
         if (sessionKey && currentKey && sessionKey !== currentKey) {
-          delete unlockedSessions[tabId];
+          await removeSessionUnlock(tabId);
         } else if (sessionHost === true || !targetHost || sessionHost === targetHost) {
           return {
             success: true,
@@ -332,7 +426,7 @@ async function handleMessage(message, sender) {
         hostname = tab.url;
       }
 
-      delete unlockedSessions[tab.id];
+      await removeSessionUnlock(tab.id);
 
       const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
       lockedTabs[tab.id] = {
@@ -371,6 +465,16 @@ async function handleMessage(message, sender) {
     }
 
     case "UNLOCK_TAB": {
+      const lockout = getLockoutStatus(storage.lockoutUntil);
+      if (lockout.isLockedOut) {
+        return {
+          success: false,
+          isLockedOut: true,
+          remainingSeconds: lockout.remainingSeconds,
+          error: `Too many attempts. Try again in ${lockout.remainingSeconds} seconds.`
+        };
+      }
+
       let tab = null;
       if (message.tabId) {
         try {
@@ -390,11 +494,21 @@ async function handleMessage(message, sender) {
       }
 
       const inputPin = message.pin;
-      const inputHash = await TabLockerCrypto.hashValue(inputPin, storage.salt);
+      const isValid = await TabLockerCrypto.verifyPassword(inputPin, storage.pinHash, storage.salt);
 
-      if (inputHash !== storage.pinHash) {
-        return { success: false, error: "Incorrect password." };
+      if (!isValid) {
+        const updated = await recordFailedAttempt(storage);
+        return {
+          success: false,
+          isLockedOut: updated.isLockedOut,
+          remainingSeconds: updated.remainingSeconds,
+          error: updated.isLockedOut
+            ? `Too many failed attempts. Locked out for ${updated.remainingSeconds} seconds.`
+            : "Incorrect password."
+        };
       }
+
+      await resetFailedAttempts();
 
       let hostname = "";
       try {
@@ -403,13 +517,13 @@ async function handleMessage(message, sender) {
 
       const { lockedTabs = {} } = await chrome.storage.local.get("lockedTabs");
       delete lockedTabs[tab.id];
-      delete unlockedSessions[tab.id];
+      await removeSessionUnlock(tab.id);
 
       if (hostname) {
         for (const [idStr, data] of Object.entries(lockedTabs)) {
           if (data.hostname === hostname) {
             delete lockedTabs[idStr];
-            delete unlockedSessions[parseInt(idStr, 10)];
+            await removeSessionUnlock(parseInt(idStr, 10));
           }
         }
       }
@@ -440,23 +554,34 @@ async function handleMessage(message, sender) {
         return { success: false, error: "Password is required." };
       }
 
-      const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+      const isValid = await TabLockerCrypto.verifyPassword(pin, storage.pinHash, storage.salt);
 
-      if (inputHash === storage.pinHash) {
-        await chrome.storage.local.set({ failedAttempts: 0, lockoutUntil: 0 });
+      if (isValid) {
+        await resetFailedAttempts();
+
+        // Transparently upgrade legacy SHA-256 hash to PBKDF2 if needed
+        if (storage.pinHash && !storage.pinHash.startsWith("pbkdf2:")) {
+          const upgradedHash = await TabLockerCrypto.hashPassword(pin, storage.salt);
+          await chrome.storage.local.set({ pinHash: upgradedHash });
+        }
 
         const targetTabId = reqTabId || sender?.tab?.id;
+        const currentUrl = message.url || sender?.tab?.url || "";
         let host = "";
         try {
           if (sender?.tab?.url) host = new URL(sender.tab.url).hostname;
         } catch (e) {}
+        if (!host && currentUrl) {
+          try {
+            host = new URL(currentUrl).hostname;
+          } catch (e) {}
+        }
 
         if (targetTabId) {
-          const currentUrl = message.url || sender?.tab?.url || "";
-          unlockedSessions[targetTabId] = {
+          await setSessionUnlock(targetTabId, {
             host: host || true,
             url: currentUrl
-          };
+          });
 
           try {
             await chrome.tabs.sendMessage(targetTabId, { type: "REMOVE_LOCK_SCREEN" });
@@ -465,26 +590,7 @@ async function handleMessage(message, sender) {
 
         return { success: true };
       } else {
-        const failedAttempts = (storage.failedAttempts || 0) + 1;
-        let newLockoutUntil = 0;
-        let lockoutSeconds = 0;
-
-        for (const rule of LOCKOUT_RULES) {
-          if (failedAttempts >= rule.failedThreshold) {
-            lockoutSeconds = rule.lockoutSeconds;
-          }
-        }
-
-        if (lockoutSeconds > 0) {
-          newLockoutUntil = Date.now() + lockoutSeconds * 1000;
-        }
-
-        await chrome.storage.local.set({
-          failedAttempts,
-          lockoutUntil: newLockoutUntil
-        });
-
-        const updatedLockout = getLockoutStatus(newLockoutUntil);
+        const updatedLockout = await recordFailedAttempt(storage);
 
         return {
           success: false,
@@ -499,6 +605,17 @@ async function handleMessage(message, sender) {
 
     case "VERIFY_RECOVERY": {
       const { recoveryKey } = message;
+      const lockout = getLockoutStatus(storage.lockoutUntil);
+
+      if (lockout.isLockedOut) {
+        return {
+          success: false,
+          isLockedOut: true,
+          remainingSeconds: lockout.remainingSeconds,
+          error: `Too many attempts. Try again in ${lockout.remainingSeconds} seconds.`
+        };
+      }
+
       if (!recoveryKey) {
         return { success: false, error: "Recovery key is required." };
       }
@@ -507,20 +624,47 @@ async function handleMessage(message, sender) {
       const inputHash = await TabLockerCrypto.hashValue(cleanKey, storage.salt);
 
       if (inputHash === storage.recoveryKeyHash) {
+        await resetFailedAttempts();
         return { success: true };
       } else {
-        return { success: false, error: "Invalid recovery key." };
+        const updated = await recordFailedAttempt(storage);
+        return {
+          success: false,
+          isLockedOut: updated.isLockedOut,
+          remainingSeconds: updated.remainingSeconds,
+          error: updated.isLockedOut
+            ? `Too many failed attempts. Locked out for ${updated.remainingSeconds} seconds.`
+            : "Invalid recovery key."
+        };
       }
     }
 
     case "SET_NEW_PIN_WITH_RECOVERY": {
       const { recoveryKey, newPin, confirmNewPin } = message;
+      const lockout = getLockoutStatus(storage.lockoutUntil);
+
+      if (lockout.isLockedOut) {
+        return {
+          success: false,
+          isLockedOut: true,
+          remainingSeconds: lockout.remainingSeconds,
+          error: `Too many attempts. Try again in ${lockout.remainingSeconds} seconds.`
+        };
+      }
 
       const cleanKey = TabLockerCrypto.cleanRecoveryKey(recoveryKey);
       const inputHash = await TabLockerCrypto.hashValue(cleanKey, storage.salt);
 
       if (inputHash !== storage.recoveryKeyHash) {
-        return { success: false, error: "Recovery key verification failed." };
+        const updated = await recordFailedAttempt(storage);
+        return {
+          success: false,
+          isLockedOut: updated.isLockedOut,
+          remainingSeconds: updated.remainingSeconds,
+          error: updated.isLockedOut
+            ? `Too many failed attempts. Locked out for ${updated.remainingSeconds} seconds.`
+            : "Recovery key verification failed."
+        };
       }
 
       if (!TabLockerCrypto.isValidPassword(newPin)) {
@@ -531,7 +675,7 @@ async function handleMessage(message, sender) {
         return { success: false, error: "Passwords do not match." };
       }
 
-      const newPinHash = await TabLockerCrypto.hashValue(newPin, storage.salt);
+      const newPinHash = await TabLockerCrypto.hashPassword(newPin, storage.salt);
 
       await chrome.storage.local.set({
         pinHash: newPinHash,
@@ -540,23 +684,34 @@ async function handleMessage(message, sender) {
       });
 
       const targetTabId = sender?.tab?.id;
+      const currentUrl = message.url || sender?.tab?.url || "";
       let host = "";
       try {
         if (sender?.tab?.url) host = new URL(sender.tab.url).hostname;
       } catch (e) {}
+      if (!host && currentUrl) {
+        try {
+          host = new URL(currentUrl).hostname;
+        } catch (e) {}
+      }
 
       if (targetTabId) {
-        const currentUrl = message.url || sender?.tab?.url || "";
-        unlockedSessions[targetTabId] = {
+        await setSessionUnlock(targetTabId, {
           host: host || true,
           url: currentUrl
-        };
+        });
 
         try {
           await chrome.tabs.sendMessage(targetTabId, { type: "REMOVE_LOCK_SCREEN" });
         } catch (e) {}
       }
 
+      return { success: true };
+    }
+
+    case "RESET_ALL_DATA": {
+      await clearAllSessionUnlocks();
+      await chrome.storage.local.clear();
       return { success: true };
     }
 

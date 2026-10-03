@@ -1,6 +1,6 @@
-# 🔒 lulululu
+# 🔒 lulululu (Personal Tab Locker)
 
-**lulululu** is a lightweight, privacy-first Google Chrome extension (Manifest V3) that allows users to lock individual browser tabs behind a custom password (any combination) with recovery key support.
+**lulululu** is a high-security, privacy-first Google Chrome extension (Manifest V3) that protects browser tabs and domains behind a master password with cryptographic recovery key support.
 
 All security credentials and state logic operate 100% locally inside your browser using standard Web Crypto and Chrome Storage APIs. No external networks, backend servers, analytics, or third-party tracking libraries are ever used.
 
@@ -8,14 +8,16 @@ All security credentials and state logic operate 100% locally inside your browse
 
 ## ✨ Features
 
-- **🔐 Custom Password Protection**: Set a password of any combination (letters, numbers, symbols, spaces, min 4 chars). Plaintext passwords are never stored; only salted SHA-256 hashes are preserved.
+- **🔐 PBKDF2 Password Protection**: Set a password of any combination (letters, numbers, symbols, spaces, min 4 chars). Uses hardware-accelerated PBKDF2-HMAC-SHA256 key derivation with 100,000 iterations and a unique 128-bit random salt.
 - **🛡️ Cryptographic Recovery Key**: Generate a 24-character hexadecimal recovery key (`crypto.getRandomValues()`) during setup to restore access if you forget your password.
-- **🔒 Per-Tab Independent Locking**: Lock specific sensitive tabs (e.g. Gmail, WhatsApp Web, GitHub) while keeping other tabs unlocked.
+- **🔒 Domain & Tab Protection**: Locks chosen websites and domains across browser sessions and tab re-opens.
+- **⚡ Synchronous Zero-Flash Cloaking**: Injects immediate synchronous visibility cloaking at `document_start` to eliminate flashes of sensitive page content before authentication.
+- **🛡️ Tamper-Resistant DOM Guardian**: Uses a reactive `MutationObserver` to prevent host page scripts from removing the overlay or clearing `inert`.
+- **⏱️ Universal Brute-Force Rate Limiting**: Exponential backoff protection delays repeated invalid password or recovery key entries (5 fails = 30s, 8 fails = 120s, 10 fails = 300s).
+- **🔄 Session-Safe Service Worker Architecture**: Uses `chrome.storage.session` to maintain active unlocked sessions across Manifest V3 background service worker sleep/termination cycles.
+- **🧭 SPA Route & In-Page Navigation Protection**: Detects client-side SPA route transitions (e.g. switching chats in ChatGPT or videos in YouTube) and relocks the view.
 - **⏸️ Master Lock Protection Switch**: Toggle protection ON/OFF directly from the popup or options page (turning OFF requires password verification).
-- **👁️ Shadow DOM Lock Screen**: Locked tabs present a full-viewport lock overlay rendered inside a closed Shadow DOM root, isolating it from host webpage scripts and CSS.
-- **⏱️ Brute-Force Rate Limiting**: Exponential backoff protection delays repeated invalid password entries (e.g., 5 failed attempts = 30s lockout).
-- **🔄 Tab Lifecycle Cleanup**: Automatically removes storage records when locked tabs are closed, preventing stale data buildup.
-- **⚙️ Comprehensive Options Dashboard**: Change password, regenerate recovery key, view all active locked tabs, unlock individual or all tabs, or perform an emergency extension factory reset.
+- **⚙️ Comprehensive Options Dashboard**: Change password, regenerate recovery key, view active locked tabs, unlock individual or all tabs, or perform an emergency extension factory reset. Sensitive data is never rendered in the DOM before authentication.
 - **🛡️ Zero Telemetry / Local-Only Privacy**: Requests minimal Chrome permissions (`storage`, `tabs`, `scripting`). Makes zero network calls.
 
 ---
@@ -36,39 +38,10 @@ Load **lulululu** directly into Google Chrome as an unpacked developer extension
 
 ---
 
-## 🐙 Git & GitHub Setup
-
-Initialize git version control locally and publish to your private repository:
-
-```bash
-# 1. Initialize local repository
-git init
-
-# 2. Stage all project files
-git add .
-
-# 3. Create initial commit
-git commit -m "Initial lulululu extension"
-
-# 4. (Optional) Connect your private GitHub remote repository
-git remote add origin git@github.com:YOUR_USERNAME/YOUR_PRIVATE_REPO.name.git
-git branch -M main
-git push -u origin main
-```
-
----
-
 ## 🔐 Security & Privacy Architecture
 
-- **No Plaintext Secrets**: Plaintext passwords and recovery keys are **never** written to `chrome.storage.local`, `localStorage`, DOM attributes, console logs, or network requests.
-- **Web Crypto Hashing**: Hashing uses native `crypto.subtle.digest("SHA-256", ...)` with a unique 128-bit random salt generated upon setup.
+- **No Plaintext Secrets**: Plaintext passwords and recovery keys are **never** written to storage, DOM attributes, console logs, or network requests.
+- **PBKDF2 Key Derivation**: Native `crypto.subtle.deriveBits("PBKDF2", ...)` with 100,000 iterations and random 128-bit salt prevents offline dictionary cracking.
 - **Cryptographic Randomness**: Recovery keys and salts are generated exclusively via `crypto.getRandomValues()`.
-- **Minimal Permissions Model**:
-  ```json
-  "permissions": [
-    "storage",
-    "tabs",
-    "scripting"
-  ]
-  ```
-- **Scoped Content Script Injection**: Content scripts are scoped exclusively to `http://*/*` and `https://*/*` web pages to render the lock overlay without requesting broad `<all_urls>` host permissions.
+- **Isolated Shadow DOM**: Lock screen UI is isolated in an Open Shadow DOM attached directly to `document.documentElement` with inline `!important` styles resistant to host page CSS.
+- **Scoped Content Script Injection**: Content scripts are scoped exclusively to `http://*/*` and `https://*/*` web pages without requesting broad `<all_urls>` host permissions.

@@ -107,6 +107,20 @@
       <div class="popup-footer">
         <button id="btn-open-options" class="btn-text">⚙ Open Full Settings</button>
       </div>
+    <!-- In-DOM Modal Prompt (Eliminates window.prompt freezing/closing in popup) -->
+    <div id="popup-prompt-modal" class="modal-overlay hidden">
+      <div class="modal-card">
+        <h4 id="prompt-modal-title">Enter Password</h4>
+        <p id="prompt-modal-msg" class="modal-desc">Please authenticate to continue.</p>
+        <form id="prompt-modal-form">
+          <input type="password" id="prompt-modal-input" placeholder="Enter Password" required autocomplete="off" />
+          <div id="prompt-modal-error" class="modal-error hidden"></div>
+          <div class="modal-actions">
+            <button type="button" id="prompt-modal-cancel" class="btn-secondary-sm">Cancel</button>
+            <button type="submit" id="prompt-modal-confirm" class="btn-primary-sm">Confirm</button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 

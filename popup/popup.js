@@ -3,6 +3,7 @@
 /**
  * Personal Tab Locker - Popup UI Script
  * Direct, resilient interface for tab locking, Master Protection toggle, and password setup.
+ * Uses in-DOM modal dialogs to eliminate window.prompt freezing/closing in Chromium popups.
  */
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -40,16 +41,58 @@ document.addEventListener("DOMContentLoaded", async () => {
   let activeTabObject = null;
   let rawGeneratedRecoveryKey = "";
 
+  /**
+   * Shows an in-DOM password modal dialog within the popup bubble.
+   * Completely avoids window.prompt() which causes popups to auto-close or freeze in Chromium.
+   */
+  function requestPasswordInPopup(title, msg) {
+    return new Promise((resolve) => {
+      const modal = document.getElementById("popup-prompt-modal");
+      const titleEl = document.getElementById("prompt-modal-title");
+      const msgEl = document.getElementById("prompt-modal-msg");
+      const input = document.getElementById("prompt-modal-input");
+      const form = document.getElementById("prompt-modal-form");
+      const cancelBtn = document.getElementById("prompt-modal-cancel");
+      const errorEl = document.getElementById("prompt-modal-error");
+
+      titleEl.textContent = title || "Authentication Required";
+      msgEl.textContent = msg || "Enter your password to proceed:";
+      input.value = "";
+      errorEl.textContent = "";
+      errorEl.classList.add("hidden");
+      modal.classList.remove("hidden");
+      setTimeout(() => input.focus(), 60);
+
+      const cleanup = () => {
+        modal.classList.add("hidden");
+        form.onsubmit = null;
+        cancelBtn.onclick = null;
+      };
+
+      cancelBtn.onclick = () => {
+        cleanup();
+        resolve(null);
+      };
+
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        const val = input.value.trim();
+        cleanup();
+        resolve(val);
+      };
+    });
+  }
+
   // Navigation to Options Page (Protected by Password)
   const openOptionsPage = async () => {
     try {
       const storage = await chrome.storage.local.get(["initialized", "salt", "pinHash"]);
       if (storage.initialized) {
-        const pin = prompt("Enter your password to open Full Settings:");
+        const pin = await requestPasswordInPopup("Open Full Settings", "Enter your password to open Full Settings:");
         if (pin === null || !pin.trim()) return;
 
-        const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
-        if (inputHash !== storage.pinHash) {
+        const isValid = await TabLockerCrypto.verifyPassword(pin, storage.pinHash, storage.salt);
+        if (!isValid) {
           showAlert("Incorrect password. Access denied.", "danger");
           return;
         }
@@ -139,13 +182,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       // Revert UI until password is verified
       chkMasterToggle.checked = true;
 
-      const pin = prompt("Enter your password to turn Master Protection OFF:");
+      const pin = await requestPasswordInPopup("Turn Protection OFF", "Enter password to turn Master Protection OFF:");
       if (pin === null || !pin.trim()) return; // Cancelled or empty
 
       const storage = await chrome.storage.local.get(["salt", "pinHash"]);
-      const inputHash = await TabLockerCrypto.hashValue(pin, storage.salt);
+      const isValid = await TabLockerCrypto.verifyPassword(pin, storage.pinHash, storage.salt);
 
-      if (inputHash && inputHash === storage.pinHash) {
+      if (isValid) {
         await chrome.storage.local.set({ protectionEnabled: false });
         updateMasterSwitchUI(false);
         showAlert("⏸️ Master Protection turned OFF. Tab locks paused.", "success");
@@ -211,7 +254,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     try {
       const salt = TabLockerCrypto.generateSalt();
-      const pinHash = await TabLockerCrypto.hashValue(pin, salt);
+      const pinHash = await TabLockerCrypto.hashPassword(pin, salt);
       const recoveryKeyHash = await TabLockerCrypto.hashValue(rawGeneratedRecoveryKey, salt);
 
       await chrome.storage.local.set({
@@ -331,7 +374,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   btnUnlockTab.addEventListener("click", async () => {
     if (!activeTabId) return;
 
-    const pin = prompt("Enter your password to unlock this tab:");
+    const pin = await requestPasswordInPopup("Unlock Tab", "Enter your password to unlock this tab:");
     if (pin === null || !pin.trim()) return; // Cancelled or empty
 
     try {
